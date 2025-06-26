@@ -35,8 +35,11 @@ def extrair_info_pdf(pdf_path):
                 texto += pytesseract.image_to_string(img, lang='por')
         doc.close()
         
-        if not re.search(r"\bNFS[- ]?E\b", texto, re.IGNORECASE):
-            print(f"[DEBUG] Ignorando não-NFSe: {pdf_path}")
+            # permite NFSe **ou** Prestação/Prestador de Serviço
+        if not re.search(r"\bNFS[- ]?E\b", texto, re.IGNORECASE) \
+        and not re.search(r"\bPrestação de Serviços\b", texto, re.IGNORECASE) \
+        and not re.search(r"\bPrestador de Serviços\b", texto, re.IGNORECASE):
+            print(f"[DEBUG] Ignorando sem padrão de NFSe ou Serviço: {pdf_path}")
             return None
 
         # número pelo nome de arquivo
