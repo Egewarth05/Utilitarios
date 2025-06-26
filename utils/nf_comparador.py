@@ -34,7 +34,10 @@ def extrair_info_pdf(pdf_path):
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 texto += pytesseract.image_to_string(img, lang='por')
         doc.close()
-        # ——————
+        
+        if not re.search(r"\bNFS[- ]?E\b", texto, re.IGNORECASE):
+            print(f"[DEBUG] Ignorando não-NFSe: {pdf_path}")
+            return None
 
         # número pelo nome de arquivo
         nome = os.path.basename(pdf_path)
