@@ -93,66 +93,65 @@ def extrair_relatorio(pdf_path):
 
     if not (xs_doc and xs_date and xs_valor and xs_especie):
         print("[DEBUG #1] cabeçalhos faltando, usando fallback")
-        return _fallback_extrair(pdf_path)
+        rel = _fallback_extrair(pdf_path)
+    else:
+        doc_x     = statistics.mean(xs_doc)
+        date_x    = statistics.mean(xs_date)
+        valor_x   = statistics.mean(xs_valor)
+        especie_x = statistics.mean(xs_especie)
+        print(f"[DEBUG #1] posições X → doc:{doc_x:.1f}, date:{date_x:.1f}, valor:{valor_x:.1f}, espécie:{especie_x:.1f}")
 
-    doc_x     = statistics.mean(xs_doc)
-    date_x    = statistics.mean(xs_date)
-    valor_x   = statistics.mean(xs_valor)
-    especie_x = statistics.mean(xs_especie)
+        # --- monta linhas agrupando por y0 arredondado ---
+        all_blocks = []
+        for p in fitz.open(pdf_path):
+            all_blocks.extend(p.get_text("blocks"))
+        rows = {}
+        for b in all_blocks:
+            rows.setdefault(round(b[1],1), []).append(b)
 
-    # --- DEBUG #1: posições X detectadas ---
-    print(f"[DEBUG #1] posições X → doc:{doc_x:.1f}, date:{date_x:.1f}, "
-          f"valor:{valor_x:.1f}, espécie:{especie_x:.1f}")
+        def pick_closest(row, x0, tol=25):
+            cands = [b for b in row if abs(b[0]-x0) <= tol]
+            return min(cands, key=lambda b: abs(b[0]-x0))[4].strip() if cands else ""
 
-    # --- monta linhas agrupando por y0 arredondado ---
-    all_blocks = []
-    for p in fitz.open(pdf_path):
-        all_blocks.extend(p.get_text("blocks"))
-    rows = {}
-    for b in all_blocks:
-        rows.setdefault(round(b[1],1), []).append(b)
+        rel = []
+        # --- loop principal extração via colunas X ---
+        for y0 in sorted(rows):
+            row       = rows[y0]
+            txt_num   = pick_closest(row, doc_x)
+            txt_date  = pick_closest(row, date_x)
+            txt_valor = pick_closest(row, valor_x)
+            txt_esp   = pick_closest(row, especie_x)
 
-    def pick_closest(row, x0, tol=25):
-        cands = [b for b in row if abs(b[0]-x0) <= tol]
-        return min(cands, key=lambda b: abs(b[0]-x0))[4].strip() if cands else ""
+            # --- DEBUG #2: veja o que capturou em cada linha ---
+            print(f"[DEBUG #2] Linha y={y0}: num={txt_num!r}, date={txt_date!r}, valor={txt_valor!r}, esp={txt_esp!r}")
 
-    rel = []
-    # --- loop principal extração via colunas X ---
-    for y0 in sorted(rows):
-        row       = rows[y0]
-        txt_num   = pick_closest(row, doc_x)
-        txt_date  = pick_closest(row, date_x)
-        txt_valor = pick_closest(row, valor_x)
-        txt_esp   = pick_closest(row, especie_x)
+            if txt_esp.strip().upper() != "NFSE":
+                continue
 
-        # --- DEBUG #2: veja o que capturou em cada coluna nesta linha ---
-        print(f"[DEBUG #2] Linha y={y0}: num={txt_num!r}, date={txt_date!r}, "
-              f"valor={txt_valor!r}, esp={txt_esp!r}")
+            m_num  = re.search(r"\b(\d+)\b",           txt_num)
+            m_date = re.search(r"(\d{2}/\d{2}/\d{4})", txt_date)
+            m_val  = re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2})", txt_valor)
+            if not (m_num and m_date and m_val):
+                continue
 
-        if txt_esp.strip().upper() != "NFSE":
-            continue
+            valor = str(Decimal(m_val.group(1).replace(".","").replace(",",".")) \
+                        .quantize(Decimal("0.01")))
+            rel.append({
+                "numero": m_num.group(1).lstrip("0"),
+                "data":   m_date.group(1),
+                "valor":  valor
+            })
 
-        m_num  = re.search(r"\b(\d+)\b",           txt_num)
-        m_date = re.search(r"(\d{2}/\d{2}/\d{4})", txt_date)
-        m_val  = re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2})", txt_valor)
-        if not (m_num and m_date and m_val):
-            continue
+        if not rel:
+            # se nada saiu, fallback refinado
+            rel = _fallback_extrair(pdf_path)
 
-        valor = str(Decimal(m_val.group(1).replace(".","").replace(",","."))
-                    .quantize(Decimal("0.01")))
-        rel.append({
-            "numero": m_num.group(1).lstrip("0"),
-            "data":   m_date.group(1),
-            "valor":  valor
-        })
+    # --- DEBUG FINAL: imprime todas as entradas extraídas ---
+    print("\n[DEBUG] Entradas extraídas do relatório:")
+    for entrada in rel:
+        print(f"  - Nº: {entrada['numero']}, Data: {entrada['data']}, Valor: R$ {entrada['valor']}")
 
-    if rel:
-        print(f"[DEBUG] Extraiu {len(rel)} entradas via colunas X")
-        return rel
-
-    # --- se nada saiu, vai para o fallback refinado ---
-    return _fallback_extrair(pdf_path)
-
+    return rel
 
 def _fallback_extrair(pdf_path):
     import fitz, re
