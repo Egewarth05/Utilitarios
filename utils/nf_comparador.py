@@ -20,12 +20,13 @@ os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
 
 def extrair_info_pdf(pdf_path):
     try:
+        # abre o PDF
         doc = fitz.open(pdf_path)
         if doc.is_encrypted:
             print(f"[DEBUG] Ignorando encriptado: {pdf_path}")
             return None
 
-        # —— REINCLUA ISTO —— 
+        # lê todo o texto (com OCR se necessário)
         texto = ""
         for page in doc:
             t = page.get_text()
@@ -36,28 +37,51 @@ def extrair_info_pdf(pdf_path):
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
                 texto += pytesseract.image_to_string(img, lang='por')
         doc.close()
-        
-            # permite NFSe **ou** Prestação/Prestador de Serviço
+
+        # filtra apenas NFSe / prestação de serviço
         if not re.search(r"\bNFS[- ]?E\b", texto, re.IGNORECASE) \
         and not re.search(r"\bPrestação de Serviços\b", texto, re.IGNORECASE) \
         and not re.search(r"\bPrestador de Serviços\b", texto, re.IGNORECASE):
             print(f"[DEBUG] Ignorando sem padrão de NFSe ou Serviço: {pdf_path}")
             return None
 
-        # número pelo nome de arquivo
+        # número pelo nome do arquivo
         nome = os.path.basename(pdf_path)
-        m = re.search(r"(\d+)", nome)
-        numero = str(int(m.group(1))).lstrip("0") if m else None
+        m_num = re.search(r"(\d+)", nome)
+        numero = str(int(m_num.group(1))).lstrip("0") if m_num else None
 
-        # data e valor pelo maior match
-        dm = re.search(r"(\d{2}/\d{2}/\d{4})", texto)
+        # monta trecho de cabeçalho (antes de "DISCRIMINAÇÃO DOS SERVIÇOS")
+        header_text = texto.split("DISCRIMINAÇÃO")[0]
+
+                # padrões de data de emissão, agora aceitando texto/linha extra entre label e valor
+        date_patterns = [
+            r"Emitido em[:\s]*[\r\n\s]*(\d{2}/\d{2}/\d{4})",
+            r"Data e Hora de Emissão[^\d]*([\d]{2}/[\d]{2}/[\d]{4})",
+            r"Emissão\s*[:]\s*[\r\n\s]*(\d{2}/\d{2}/\d{4})",
+            r"Emissão em[:\s]*[\r\n\s]*(\d{2}/\d{2}/\d{4})"
+        ]
+
+        data = None
+        for pat in date_patterns:
+            m = re.search(pat, header_text, re.IGNORECASE)
+            if m:
+                data = m.group(1)
+                break
+
+        # se nenhum padrão explícito bateu, pega a primeira data no header
+        if not data:
+            m = re.search(r"(\d{2}/\d{2}/\d{4})", header_text)
+            data = m.group(1) if m else None
+
+        # extrai valor (maior valor encontrado em todo o texto)
         raw_vals = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", texto)
         valor = None
         if raw_vals:
             vf = max(Decimal(v.replace(".", "").replace(",", ".")) for v in raw_vals)
             valor = str(vf.quantize(Decimal("0.01")))
 
-        return {"numero": numero, "data": dm.group(1) if dm else None, "valor": valor}
+        return {"numero": numero, "data": data, "valor": valor}
+
     except Exception as e:
         print(f"Erro extraindo {pdf_path}: {e}")
         return None
@@ -77,64 +101,54 @@ def extrair_notas_zip(zip_path, temp_dir):
     return notas
 
 def extrair_relatorio_com_pdfplumber(pdf_path):
-    import pdfplumber
-    from decimal import Decimal
-
+    rel = []
+    # 1) Abre e acumula as linhas de todas as páginas
     with pdfplumber.open(pdf_path) as pdf:
-        page   = pdf.pages[0]
-        # extrai *todas* as tabelas da página
-        tables = page.extract_tables()
-        if not tables:
-            raise ValueError("Não foi possível extrair nenhuma tabela com pdfplumber.")
-        # pega a maior (em número de linhas), que normalmente é o relatório inteiro
-        table = max(tables, key=lambda t: len(t))
+        rows = []
+        for page in pdf.pages:
+            table = page.extract_table()
+            if not table:
+                continue
+            # remove linhas totalmente em branco
+            for row in table:
+                if any(cell not in (None, '') for cell in row):
+                    rows.append(row)
 
-    # 1) encontra o índice da linha que é realmente o cabeçalho
-    header_idx = next(
-        i for i,row in enumerate(table)
-        if any('docum' in (c or '').lower()  for c in row)
-        and any('espécie' in (c or '').lower() for c in row)
-        and any('valor' in (c or '').lower()   for c in row)
-    )
+    if not rows:
+        raise ValueError("Não foi possível extrair nenhuma linha de nenhum página.")
 
-    # 2) normaliza os textos desse cabeçalho
-    header_row = table[header_idx]
+    # 2) Identifica cabeçalho real na primeira linha não-vazia
+    header_row = rows[0]
     headers = [
-        (cell or '').replace('\n',' ').strip().lower()
+        (cell or '').replace('\n', ' ').strip().lower()
         for cell in header_row
     ]
     print("[DEBUG cabeçalhos normalizados]", headers)
 
-    # 3) agora sim pega cada índice
-    # primeiro 'documento'; se não achar, tenta 'chave'
+    # 3) Mapeia índices
     try:
-        idx_doc = next(i for i,h in enumerate(headers) if 'docum' in h or 'documento' in h)
-    except StopIteration:
-        idx_doc = next(i for i,h in enumerate(headers) if 'chave' in h)
+        idx_doc     = next(i for i,h in enumerate(headers) if 'docum'   in h or 'documento' in h)
+        idx_especie = next(i for i,h in enumerate(headers) if 'espécie' in h)
+        idx_date    = next(i for i,h in enumerate(headers) if 'entrada' in h)
+        idx_valor   = next(i for i,h in enumerate(headers) if 'valor'   in h)
+    except StopIteration as e:
+        raise ValueError(f"Cabeçalho não encontrado: {e}")
 
-    idx_especie = next(i for i,h in enumerate(headers) if 'espécie' in h)
-    idx_date    = next(i for i,h in enumerate(headers) if 'entrada' in h)
-    idx_valor   = next(i for i,h in enumerate(headers) if 'valor' in h)
-
-    # 4) percorre só as linhas abaixo do cabeçalho
-    rel = []
-    for row in table[header_idx+1:]:
+    # 4) Percorre todas as linhas de dados (a partir da segunda)
+    for row in rows[1:]:
         especie = (row[idx_especie] or '').strip().upper()
         if especie != 'NFSE':
             continue
 
         numero  = (row[idx_doc]  or '').strip()
         data    = (row[idx_date] or '').strip()
-        raw_val = (row[idx_valor] or '').strip().replace(' ', '')
-        print(f"DBG ➜ número={numero!r}, data={data!r}, valor={raw_val!r}")
-
-        # converte para Decimal
+        raw_val = (row[idx_valor] or '').strip()
         try:
-            valor = Decimal(raw_val.replace('.','').replace(',','.'))
+            valor = Decimal(raw_val.replace('.', '').replace(',', '.'))
         except:
             continue
 
-        if numero and data and valor is not None:
+        if numero and data and valor:
             rel.append({'numero': numero, 'data': data, 'valor': valor})
 
     return rel
