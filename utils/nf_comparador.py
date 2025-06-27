@@ -1,8 +1,10 @@
 import os
 import rarfile
 import datetime
+from collections import defaultdict
 import fitz  # PyMuPDF
 import pytesseract
+import pdfplumber
 from PIL import Image
 from decimal import Decimal, InvalidOperation
 import io
@@ -74,77 +76,138 @@ def extrair_notas_zip(zip_path, temp_dir):
                 notas.append(info)
     return notas
 
+def extrair_relatorio_com_pdfplumber(pdf_path):
+    import pdfplumber
+    from decimal import Decimal
+
+    with pdfplumber.open(pdf_path) as pdf:
+        page   = pdf.pages[0]
+        # extrai *todas* as tabelas da página
+        tables = page.extract_tables()
+        if not tables:
+            raise ValueError("Não foi possível extrair nenhuma tabela com pdfplumber.")
+        # pega a maior (em número de linhas), que normalmente é o relatório inteiro
+        table = max(tables, key=lambda t: len(t))
+
+    # 1) encontra o índice da linha que é realmente o cabeçalho
+    header_idx = next(
+        i for i,row in enumerate(table)
+        if any('docum' in (c or '').lower()  for c in row)
+        and any('espécie' in (c or '').lower() for c in row)
+        and any('valor' in (c or '').lower()   for c in row)
+    )
+
+    # 2) normaliza os textos desse cabeçalho
+    header_row = table[header_idx]
+    headers = [
+        (cell or '').replace('\n',' ').strip().lower()
+        for cell in header_row
+    ]
+    print("[DEBUG cabeçalhos normalizados]", headers)
+
+    # 3) agora sim pega cada índice
+    # primeiro 'documento'; se não achar, tenta 'chave'
+    try:
+        idx_doc = next(i for i,h in enumerate(headers) if 'docum' in h or 'documento' in h)
+    except StopIteration:
+        idx_doc = next(i for i,h in enumerate(headers) if 'chave' in h)
+
+    idx_especie = next(i for i,h in enumerate(headers) if 'espécie' in h)
+    idx_date    = next(i for i,h in enumerate(headers) if 'entrada' in h)
+    idx_valor   = next(i for i,h in enumerate(headers) if 'valor' in h)
+
+    # 4) percorre só as linhas abaixo do cabeçalho
+    rel = []
+    for row in table[header_idx+1:]:
+        especie = (row[idx_especie] or '').strip().upper()
+        if especie != 'NFSE':
+            continue
+
+        numero  = (row[idx_doc]  or '').strip()
+        data    = (row[idx_date] or '').strip()
+        raw_val = (row[idx_valor] or '').strip().replace(' ', '')
+        print(f"DBG ➜ número={numero!r}, data={data!r}, valor={raw_val!r}")
+
+        # converte para Decimal
+        try:
+            valor = Decimal(raw_val.replace('.','').replace(',','.'))
+        except:
+            continue
+
+        if numero and data and valor is not None:
+            rel.append({'numero': numero, 'data': data, 'valor': valor})
+
+    return rel
+
 def extrair_relatorio(pdf_path):
-    import fitz, re, statistics
-    from decimal import Decimal, InvalidOperation
+    doc  = fitz.open(pdf_path)
+    page = doc[0]
+    words = page.get_text("words")   # (x0,y0,x1,y1, word, bno, lno, wno)
 
-    # --- abre todo o PDF e coleta blocos para detectar cabeçalhos ---
-    doc = fitz.open(pdf_path)
-    header_blocks = []
-    for p in doc:
-        header_blocks.extend(p.get_text("blocks"))
-    doc.close()
+    # 1) agrupa por linha
+    linhas = defaultdict(list)
+    for x0, y0, x1, y1, w, bno, lno, wno in words:
+        linhas[lno].append((w.lower(), x0))
 
-    # --- calcula médias X dos cabeçalhos ---
-    xs_doc     = [b[0] for b in header_blocks if "docum"         in b[4].lower()]
-    xs_date    = [b[0] for b in header_blocks if "entrada/saíd"  in b[4].lower()]
-    xs_valor   = [b[0] for b in header_blocks if "valor contábil" in b[4].lower()]
-    xs_especie = [b[0] for b in header_blocks if "espécie"       in b[4].lower()]
+    # 2) para cada coluna, ache o lno e o x0 médio
+    def achar_x(header_kw):
+        # devolve média de todos x0 cujo word contenha header_kw
+        matches = [(lno, x) 
+                   for lno, ws in linhas.items() 
+                   for w,x in ws if header_kw in w]
+        if not matches:
+            raise ValueError(f"Não achei header contendo '{header_kw}'")
+        # pega só os x0
+        xs = [x for _,x in matches]
+        return statistics.mean(xs)
 
-    if not (xs_doc and xs_date and xs_valor and xs_especie):
-        print("[DEBUG #1] cabeçalhos faltando, usando fallback")
-        rel = _fallback_extrair(pdf_path)
-    else:
-        doc_x     = statistics.mean(xs_doc)
-        date_x    = statistics.mean(xs_date)
-        valor_x   = statistics.mean(xs_valor)
-        especie_x = statistics.mean(xs_especie)
-        print(f"[DEBUG #1] posições X → doc:{doc_x:.1f}, date:{date_x:.1f}, valor:{valor_x:.1f}, espécie:{especie_x:.1f}")
+    doc_x     = achar_x("docum")        # vai achar “Docum” e “ento”
+    valor_x   = achar_x("valor")        # acha “valor” em “Valor Contábil”
+    date_x    = achar_x("entrada")      # acha “Entrada/Saíd”
+    especie_x = achar_x("espécie")      # acha “Espécie”
 
-        # --- monta linhas agrupando por y0 arredondado ---
-        all_blocks = []
-        for p in fitz.open(pdf_path):
-            all_blocks.extend(p.get_text("blocks"))
-        rows = {}
-        for b in all_blocks:
-            rows.setdefault(round(b[1],1), []).append(b)
+    print(f"[DEBUG #1] X cols → doc:{doc_x:.1f}, valor:{valor_x:.1f}, "
+          f"date:{date_x:.1f}, esp:{especie_x:.1f}")
 
-        def pick_closest(row, x0, tol=25):
-            cands = [b for b in row if abs(b[0]-x0) <= tol]
-            return min(cands, key=lambda b: abs(b[0]-x0))[4].strip() if cands else ""
+    # 3) monta rows a partir de blocks e usa pick_closest como antes
+    all_blocks = page.get_text("blocks")
+    rows = {}
+    for x0,y0,x1,y1,txt, *_ in all_blocks:
+        key = round(y0,1)
+        rows.setdefault(key, []).append((x0, txt.strip()))
+        
+    col_positions = sorted([doc_x, valor_x, date_x, especie_x])
+    tol = min(b - a for a, b in zip(col_positions, col_positions[1:])) / 2
+    print(f"[DEBUG] tolerância dinâmica: {tol:.1f}px")    
 
-        rel = []
-        # --- loop principal extração via colunas X ---
-        for y0 in sorted(rows):
-            row       = rows[y0]
-            txt_num   = pick_closest(row, doc_x)
-            txt_date  = pick_closest(row, date_x)
-            txt_valor = pick_closest(row, valor_x)
-            txt_esp   = pick_closest(row, especie_x)
+    def pick_closest(row, x_ref, tol=tol):
+        cands = [(x,txt) for x,txt in row if abs(x - x_ref) <= tol]
+        return min(cands, key=lambda t: abs(t[0] - x_ref))[1] if cands else ""
 
-            # --- DEBUG #2: veja o que capturou em cada linha ---
-            print(f"[DEBUG #2] Linha y={y0}: num={txt_num!r}, date={txt_date!r}, valor={txt_valor!r}, esp={txt_esp!r}")
+    rel = []
+    for y in sorted(rows):
+        row   = rows[y]
+        num   = pick_closest(row, doc_x)
+        val   = pick_closest(row, valor_x)
+        date  = pick_closest(row, date_x)
+        esp   = pick_closest(row, especie_x)
+        print(f"[DEBUG #2] y={y}: num={num!r}, valor={val!r}, date={date!r}, esp={esp!r}")
 
-            if txt_esp.strip().upper() != "NFSE":
-                continue
-
-            m_num  = re.search(r"\b(\d+)\b",           txt_num)
-            m_date = re.search(r"(\d{2}/\d{2}/\d{4})", txt_date)
-            m_val  = re.search(r"(\d{1,3}(?:\.\d{3})*,\d{2})", txt_valor)
-            if not (m_num and m_date and m_val):
-                continue
-
-            valor = str(Decimal(m_val.group(1).replace(".","").replace(",",".")) \
-                        .quantize(Decimal("0.01")))
+        if esp.upper() != "NFSE":
+            continue
+        m_num  = re.search(r"\b(\d+)\b",           num)
+        m_date = re.search(r"\d{2}/\d{2}/\d{4}",  date)
+        m_val  = re.search(r"\d{1,3}(?:\.\d{3})*,\d{2}", val)
+        if m_num and m_date and m_val:
             rel.append({
                 "numero": m_num.group(1).lstrip("0"),
-                "data":   m_date.group(1),
-                "valor":  valor
+                "data":   m_date.group(0),
+                "valor":  str(Decimal(m_val.group(0).replace(".","").replace(",",".")))
             })
 
-        if not rel:
-            # se nada saiu, fallback refinado
-            rel = _fallback_extrair(pdf_path)
+    if not rel:
+        # se nada saiu, fallback refinado
+        rel = _fallback_extrair(pdf_path)
 
     # --- DEBUG FINAL: imprime todas as entradas extraídas ---
     print("\n[DEBUG] Entradas extraídas do relatório:")
@@ -282,10 +345,12 @@ def comparar_nfs(notas_zip, relatorio, output_dir):
     }
 
 def processar_comparacao_nf(zip_path, relatorio_pdf_path, output_dir):
-    """Wrapper para o Flask."""
-    temp = os.path.join(os.path.dirname(output_dir), "temp_notas")
+    temp  = os.path.join(os.path.dirname(output_dir), "temp_notas")
     notas = extrair_notas_zip(zip_path, temp)
-    rel = extrair_relatorio(relatorio_pdf_path)
+
+    # usa pdfplumber para extrair o relatório
+    rel = extrair_relatorio_com_pdfplumber(relatorio_pdf_path)
+
     res = comparar_nfs(notas, rel, output_dir)
     pdf = res.pop("pdf")
     return res, pdf
