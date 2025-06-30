@@ -53,7 +53,7 @@ def extrair_info_pdf(pdf_path):
         # monta trecho de cabeçalho (antes de "DISCRIMINAÇÃO DOS SERVIÇOS")
         header_text = texto.split("DISCRIMINAÇÃO")[0]
 
-                # padrões de data de emissão, agora aceitando texto/linha extra entre label e valor
+        # padrões de data de emissão
         date_patterns = [
             r"Emitido em[:\s]*[\r\n\s]*(\d{2}/\d{2}/\d{4})",
             r"Data e Hora de Emissão[^\d]*([\d]{2}/[\d]{2}/[\d]{4})",
@@ -68,10 +68,28 @@ def extrair_info_pdf(pdf_path):
                 data = m.group(1)
                 break
 
-        # se nenhum padrão explícito bateu, pega a primeira data no header
+        # Se nenhum padrão explícito de emissão bateu, procura outras datas no cabeçalho
+        # e tenta evitar datas de "Vencimentos"
         if not data:
-            m = re.search(r"(\d{2}/\d{2}/\d{4})", header_text)
-            data = m.group(1) if m else None
+            non_vencimento_date_found = None
+            
+            # Encontra todas as ocorrências de datas no formato DD/MM/AAAA com suas posições
+            for match in re.finditer(r"(\d{2}/\d{2}/\d{4})", header_text):
+                current_date_str = match.group(1)
+                start_pos = match.start()
+                
+                # Define uma janela antes da data para verificar a presença de "Vencimentos"
+                # Procura até 50 caracteres para trás
+                check_start = max(0, start_pos - 50) 
+                pre_date_context = header_text[check_start:start_pos]
+                
+                # Se "Vencimentos" não for encontrado no contexto anterior, considera essa data
+                if not re.search(r"Vencimento(s)?", pre_date_context, re.IGNORECASE):
+                    non_vencimento_date_found = current_date_str
+                    break # Pega a primeira data adequada e sai do loop
+            
+            if non_vencimento_date_found:
+                data = non_vencimento_date_found
 
         # extrai valor (maior valor encontrado em todo o texto)
         raw_vals = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", texto)
