@@ -55,6 +55,8 @@ def extrair_info_pdf(pdf_path):
 
         # padrões de data de emissão
         date_patterns = [
+            r"Data de Geração da NFS[- ]?e[^\d]*(\d{2}/\d{2}/\d{4})",    # DF-DF usa esse label :contentReference[oaicite:0]{index=0}
+            r"Data de Competência[^\d]*(\d{2}/\d{2}/\d{4})",
             r"Emitido em[:\s]*[\r\n\s]*(\d{2}/\d{2}/\d{4})",
             r"Data e Hora de Emissão[^\d]*([\d]{2}/[\d]{2}/[\d]{4})",
             r"Emissão\s*[:]\s*[\r\n\s]*(\d{2}/\d{2}/\d{4})",
@@ -68,8 +70,6 @@ def extrair_info_pdf(pdf_path):
                 data = m.group(1)
                 break
 
-        # Se nenhum padrão explícito de emissão bateu, procura outras datas no cabeçalho
-        # e tenta evitar datas de "Vencimentos"
         if not data:
             non_vencimento_date_found = None
             
@@ -120,17 +120,26 @@ def extrair_notas_zip(zip_path, temp_dir):
 
 def extrair_relatorio_com_pdfplumber(pdf_path):
     rel = []
-    # 1) Abre e acumula as linhas de todas as páginas
+    print(f"[DEBUG] Abrindo relatório: {pdf_path}") # Nova linha de depuração
     with pdfplumber.open(pdf_path) as pdf:
         rows = []
-        for page in pdf.pages:
+        for i, page in enumerate(pdf.pages): # Adicionado 'i' para número da página
+            print(f"[DEBUG] Processando página {i+1} de {pdf_path}") # Nova linha de depuração
             table = page.extract_table()
             if not table:
+                print(f"[DEBUG] Nenhuma tabela encontrada na página {i+1}.") # Nova linha de depuração
                 continue
+            
+            # Nova linha de depuração: Mostra a tabela bruta extraída por página
+            print(f"[DEBUG] Tabela bruta da página {i+1}:\n{table}") 
+
             # remove linhas totalmente em branco
             for row in table:
                 if any(cell not in (None, '') for cell in row):
                     rows.append(row)
+    
+    # Nova linha de depuração: Mostra todas as linhas acumuladas após limpeza
+    print(f"[DEBUG] Todas as linhas extraídas (após remoção de brancos):\n{rows}")
 
     if not rows:
         raise ValueError("Não foi possível extrair nenhuma linha de nenhum página.")
@@ -143,31 +152,43 @@ def extrair_relatorio_com_pdfplumber(pdf_path):
     ]
     print("[DEBUG cabeçalhos normalizados]", headers)
 
-    # 3) Mapeia índices
+    # 3) Mapeia índices (seu código atual permanece)
     try:
         idx_doc     = next(i for i,h in enumerate(headers) if 'docum'   in h or 'documento' in h)
         idx_especie = next(i for i,h in enumerate(headers) if 'espécie' in h)
         idx_date    = next(i for i,h in enumerate(headers) if 'entrada' in h)
         idx_valor   = next(i for i,h in enumerate(headers) if 'valor'   in h)
+        print(f"[DEBUG] Índices de colunas: Doc={idx_doc}, Espécie={idx_especie}, Data={idx_date}, Valor={idx_valor}") # Nova linha de depuração
     except StopIteration as e:
         raise ValueError(f"Cabeçalho não encontrado: {e}")
 
     # 4) Percorre todas as linhas de dados (a partir da segunda)
-    for row in rows[1:]:
+    for row_idx, row in enumerate(rows[1:]): # Adicionado 'row_idx' para depuração
         especie = (row[idx_especie] or '').strip().upper()
-        if especie != 'NFSE':
-            continue
-
         numero  = (row[idx_doc]  or '').strip()
         data    = (row[idx_date] or '').strip()
         raw_val = (row[idx_valor] or '').strip()
+
+        print(f"[DEBUG] Linha {row_idx+2} (após cabeçalho): Espécie='{especie}', Número='{numero}', Data='{data}', Valor Bruto='{raw_val}'") # Nova linha de depuração
+
+        if especie != 'NFSE':
+            print(f"[DEBUG] Ignorando linha {row_idx+2}: Não é NFSE.") # Nova linha de depuração
+            continue
+
         try:
             valor = Decimal(raw_val.replace('.', '').replace(',', '.'))
-        except:
+        except InvalidOperation: # Usar InvalidOperation para ser mais específico
+            print(f"[DEBUG] Erro de conversão de valor na linha {row_idx+2}: '{raw_val}' não é um valor válido.") # Nova linha de depuração
+            continue
+        except Exception as e: # Captura outros erros de conversão
+            print(f"[DEBUG] Erro inesperado na conversão de valor da linha {row_idx+2}: {e} para '{raw_val}'.")
             continue
 
         if numero and data and valor:
+            print(f"[DEBUG] Adicionando ao relatório: {{'numero': '{numero}', 'data': '{data}', 'valor': '{valor}'}}") # Nova linha de depuração
             rel.append({'numero': numero, 'data': data, 'valor': valor})
+        else:
+            print(f"[DEBUG] Linha {row_idx+2} incompleta: numero={numero}, data={data}, valor={valor}. Ignorando.") # Nova linha de depuração
 
     return rel
 
@@ -338,33 +359,69 @@ def comparar_nfs(notas_zip, relatorio, output_dir):
     encontradas, divergentes, nao_encontradas = [], [], []
 
     for nf in notas_zip:
-        # **PASSO 2: validação da string antes de converter em int**
         num_str = nf.get("numero", "")
         if not num_str.isdigit():
-            # se veio vazio ou com letras, já marca como não encontrada
             nao_encontradas.append(nf)
             continue
-
         num = int(num_str)
 
-        # resto da sua lógica de comparação
-        match = next(
-            (r for r in relatorio
-                if r.get("numero") and r["numero"].isdigit()
-                and int(r["numero"]) == num),
-            None
-        )
-        if not match:
-            nao_encontradas.append(nf)
+        # Converte o valor da NF-e individual para Decimal para comparação consistente.
+        # O valor é uma string em 'notas', então o 'replace' é necessário aqui.
+        nf_valor_decimal = Decimal(nf.get("valor", "0").replace(",", "."))
+
+        # 1. Tentar encontrar uma correspondência EXATA (número, data e valor)
+        exact_match = None
+        for r in relatorio:
+            if r.get("numero") and r["numero"].isdigit():
+                # O valor de 'r["valor"]' já é um Decimal vindo de 'extrair_relatorio_com_pdfplumber',
+                # então NÃO precisamos do '.replace()' aqui.
+                r_valor_decimal = r.get("valor", Decimal("0"))
+
+                if int(r["numero"]) == num and \
+                   r.get("data") == nf.get("data") and \
+                   r_valor_decimal == nf_valor_decimal:
+                    exact_match = r
+                    break
+
+        if exact_match:
+            encontradas.append(nf)
             continue
 
-        if nf["data"] == match["data"] and Decimal(nf["valor"]) == Decimal(match["valor"]):
-            encontradas.append(nf)
-        else:
-            nf["esperado"] = match
-            divergentes.append(nf)
+        # 2. Se não houver correspondência exata, tentar encontrar por NÚMERO e DATA
+        date_match = None
+        for r in relatorio:
+            if r.get("numero") and r["numero"].isdigit():
+                if int(r["numero"]) == num and r.get("data") == nf.get("data"):
+                    date_match = r
+                    break
 
-    # geração do PDF, etc...
+        if date_match:
+            # Encontrou por número e data, mas o valor pode ser diferente. É uma divergência.
+            # Compara nf_valor_decimal (já Decimal) com date_match['valor'] (já Decimal)
+            if nf_valor_decimal == date_match["valor"]:
+                encontradas.append(nf)
+            else:
+                nf["esperado"] = date_match
+                divergentes.append(nf)
+            continue
+
+        # 3. Se não houver correspondência por número e data, tentar apenas por NÚMERO
+        num_only_match = None
+        for r in relatorio:
+            if r.get("numero") and r["numero"].isdigit() and int(r["numero"]) == num:
+                num_only_match = r
+                break
+
+        if num_only_match:
+            # Encontrou apenas por número. É uma divergência.
+            nf["esperado"] = num_only_match
+            divergentes.append(nf)
+            continue
+
+        # Se não encontrou nenhuma correspondência
+        nao_encontradas.append(nf)
+
+    # O restante da função 'comparar_nfs' permanece inalterado
     os.makedirs(output_dir, exist_ok=True)
     pdf = os.path.join(output_dir, "relatorio_validacao.pdf")
     gerar_pdf_relatorio(encontradas, divergentes, nao_encontradas, pdf)
