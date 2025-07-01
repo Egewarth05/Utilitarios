@@ -1,6 +1,8 @@
 import os
 import rarfile
+import shutil
 import datetime
+import stat
 from collections import defaultdict
 import fitz  # PyMuPDF
 import pytesseract
@@ -19,90 +21,94 @@ pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tessera
 os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
 
 def extrair_info_pdf(pdf_path):
-    try:
-        # abre o PDF
-        doc = fitz.open(pdf_path)
-        if doc.is_encrypted:
-            print(f"[DEBUG] Ignorando encriptado: {pdf_path}")
-            return None
+    doc   = fitz.open(pdf_path)
+    texto = ""
+    for page in doc:
+        t = page.get_text()
+        if t.strip():
+            texto += t
+        else:
+            pix   = page.get_pixmap(dpi=300)
+            img   = Image.open(io.BytesIO(pix.tobytes("png")))
+            texto += pytesseract.image_to_string(img, lang='por')
+    doc.close()
 
-        # lê todo o texto (com OCR se necessário)
-        texto = ""
-        for page in doc:
-            t = page.get_text()
-            if t.strip():
-                texto += t
-            else:
-                pix = page.get_pixmap(dpi=300)
-                img = Image.open(io.BytesIO(pix.tobytes("png")))
-                texto += pytesseract.image_to_string(img, lang='por')
-        doc.close()
+    # --- 0) filtra só NFS-e (não NFe) ---
+    if not re.search(r"\bNFS[- ]?E\b", texto, re.IGNORECASE):
+        print(f"[DEBUG][PDF] Pulando {os.path.basename(pdf_path)} (não é NFS-e)")
+        return None
 
-        # filtra apenas NFSe / prestação de serviço
-        if not re.search(r"\bNFS[- ]?E\b", texto, re.IGNORECASE) \
-        and not re.search(r"\bPrestação de Serviços\b", texto, re.IGNORECASE) \
-        and not re.search(r"\bPrestador de Serviços\b", texto, re.IGNORECASE):
-            print(f"[DEBUG] Ignorando sem padrão de NFSe ou Serviço: {pdf_path}")
-            return None
+    # --- 1) número da NF pelo nome do arquivo ---
+    m_num  = re.search(r"(\d+)", os.path.basename(pdf_path))
+    numero = str(int(m_num.group(1))).lstrip("0") if m_num else None
 
-        # número pelo nome do arquivo
-        nome = os.path.basename(pdf_path)
-        m_num = re.search(r"(\d+)", nome)
-        numero = str(int(m_num.group(1))).lstrip("0") if m_num else None
+    # --- 2) isola até “DISCRIMINAÇÃO” e normaliza espaços ---
+    header_section = re.split(r"(?i)discriminação", texto)[0]
+    header_clean   = re.sub(r"\s+", " ", header_section).strip()
+    print(f"[DEBUG][PDF] {os.path.basename(pdf_path)} → {header_clean[:200]!r}")
 
-        # monta trecho de cabeçalho (antes de "DISCRIMINAÇÃO DOS SERVIÇOS")
-        header_text = texto.split("DISCRIMINAÇÃO")[0]
-
-        # padrões de data de emissão
-        date_patterns = [
-            r"Data de Geração da NFS[- ]?e[^\d]*(\d{2}/\d{2}/\d{4})",    # DF-DF usa esse label :contentReference[oaicite:0]{index=0}
-            r"Data de Competência[^\d]*(\d{2}/\d{2}/\d{4})",
-            r"Emitido em[:\s]*[\r\n\s]*(\d{2}/\d{2}/\d{4})",
-            r"Data e Hora de Emissão[^\d]*([\d]{2}/[\d]{2}/[\d]{4})",
-            r"Emissão\s*[:]\s*[\r\n\s]*(\d{2}/\d{2}/\d{4})",
-            r"Emissão em[:\s]*[\r\n\s]*(\d{2}/\d{2}/\d{4})"
-        ]
-
+    # --- 3) extrai data: primeiro label específico ---
+    m_label = re.search(
+        r"Data e Hora de Emissão\D*(\d{2}/\d{2}/\d{4})",
+        header_clean, re.IGNORECASE
+    )
+    if m_label:
+        data = m_label.group(1)
+    else:
+        # fallback: primeira data no texto que não esteja perto de “Vencimento”
         data = None
-        for pat in date_patterns:
-            m = re.search(pat, header_text, re.IGNORECASE)
-            if m:
-                data = m.group(1)
+        for mm in re.finditer(r"(\d{2}/\d{2}/\d{4})", texto):
+            ctx = texto[max(0, mm.start()-30): mm.start()]
+            if not re.search(r"venci", ctx, re.IGNORECASE):
+                data = mm.group(1)
                 break
 
-        if not data:
-            non_vencimento_date_found = None
-            
-            # Encontra todas as ocorrências de datas no formato DD/MM/AAAA com suas posições
-            for match in re.finditer(r"(\d{2}/\d{2}/\d{4})", header_text):
-                current_date_str = match.group(1)
-                start_pos = match.start()
-                
-                # Define uma janela antes da data para verificar a presença de "Vencimentos"
-                # Procura até 50 caracteres para trás
-                check_start = max(0, start_pos - 50) 
-                pre_date_context = header_text[check_start:start_pos]
-                
-                # Se "Vencimentos" não for encontrado no contexto anterior, considera essa data
-                if not re.search(r"Vencimento(s)?", pre_date_context, re.IGNORECASE):
-                    non_vencimento_date_found = current_date_str
-                    break # Pega a primeira data adequada e sai do loop
-            
-            if non_vencimento_date_found:
-                data = non_vencimento_date_found
+    # --- 4) extrai valor (maior ocorrência) ---
+    raw_vals = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", texto)
+    valor    = None
+    if raw_vals:
+        vf    = max(Decimal(v.replace(".", "").replace(",", ".")) for v in raw_vals)
+        valor = str(vf.quantize(Decimal("0.01")))
 
-        # extrai valor (maior valor encontrado em todo o texto)
-        raw_vals = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", texto)
-        valor = None
-        if raw_vals:
-            vf = max(Decimal(v.replace(".", "").replace(",", ".")) for v in raw_vals)
-            valor = str(vf.quantize(Decimal("0.01")))
+    return {"numero": numero, "data": data, "valor": valor}
 
-        return {"numero": numero, "data": data, "valor": valor}
+def extrair_relatorio_com_pdfplumber(pdf_path):
+    # extrai todas as linhas não-brancas
+    with pdfplumber.open(pdf_path) as pdf:
+        rows = []
+        for page in pdf.pages:
+            table = page.extract_table()
+            if table:
+                for row in table:
+                    if any(cell not in (None, "") for cell in row):
+                        rows.append([cell or "" for cell in row])
 
-    except Exception as e:
-        print(f"Erro extraindo {pdf_path}: {e}")
-        return None
+    print(f"[DEBUG][RELATÓRIO] {os.path.basename(pdf_path)} → {len(rows)} linhas")
+    if not rows:
+        raise ValueError("Nenhuma linha extraída do relatório.")
+
+    # identifica cabeçalho e índices
+    header = [c.replace("\n", " ").strip().lower() for c in rows[0]]
+    idx_doc     = next(i for i,h in enumerate(header) if "docum" in h)
+    idx_especie = next(i for i,h in enumerate(header) if "espécie" in h)
+    idx_date    = next(i for i,h in enumerate(header) if "entrada" in h)
+    idx_valor   = next(i for i,h in enumerate(header) if "valor" in h)
+
+    # coleta apenas linhas de NFSe
+    rel = []
+    for row in rows[1:]:
+        if row[idx_especie].strip().upper() != "NFSE":
+            continue
+        numero  = row[idx_doc].strip()
+        data    = row[idx_date].strip()
+        raw_val = row[idx_valor].strip()
+        try:
+            valor = str(Decimal(raw_val.replace(".", "").replace(",", ".")).quantize(Decimal("0.01")))
+        except InvalidOperation:
+            continue
+        rel.append({"numero": numero, "data": data, "valor": valor})
+
+    return rel
 
 def extrair_notas_zip(zip_path, temp_dir):
     """Descompacta o RAR e aplica extrair_info_pdf em cada PDF."""
@@ -364,64 +370,42 @@ def comparar_nfs(notas_zip, relatorio, output_dir):
             nao_encontradas.append(nf)
             continue
         num = int(num_str)
+        nf_data  = nf.get("data")
+        nf_valor = Decimal(nf["valor"].replace(",", "."))
 
-        # Converte o valor da NF-e individual para Decimal para comparação consistente.
-        # O valor é uma string em 'notas', então o 'replace' é necessário aqui.
-        nf_valor_decimal = Decimal(nf.get("valor", "0").replace(",", "."))
+        # 1) todas as ocorrências no relatório com o mesmo número
+        matches = [r for r in relatorio
+                   if r.get("numero","").isdigit() and int(r["numero"]) == num]
 
-        # 1. Tentar encontrar uma correspondência EXATA (número, data e valor)
-        exact_match = None
-        for r in relatorio:
-            if r.get("numero") and r["numero"].isdigit():
-                # O valor de 'r["valor"]' já é um Decimal vindo de 'extrair_relatorio_com_pdfplumber',
-                # então NÃO precisamos do '.replace()' aqui.
-                r_valor_decimal = r.get("valor", Decimal("0"))
-
-                if int(r["numero"]) == num and \
-                   r.get("data") == nf.get("data") and \
-                   r_valor_decimal == nf_valor_decimal:
-                    exact_match = r
-                    break
-
-        if exact_match:
-            encontradas.append(nf)
+        # 2) se não encontrar nenhuma, vai para 'não encontradas'
+        if not matches:
+            nao_encontradas.append(nf)
             continue
 
-        # 2. Se não houver correspondência exata, tentar encontrar por NÚMERO e DATA
-        date_match = None
-        for r in relatorio:
-            if r.get("numero") and r["numero"].isdigit():
-                if int(r["numero"]) == num and r.get("data") == nf.get("data"):
-                    date_match = r
-                    break
-
-        if date_match:
-            # Encontrou por número e data, mas o valor pode ser diferente. É uma divergência.
-            # Compara nf_valor_decimal (já Decimal) com date_match['valor'] (já Decimal)
-            if nf_valor_decimal == date_match["valor"]:
+        # 3) se houver múltiplas, tente achar uma com os 3 fatores iguais
+        if len(matches) > 1:
+            # procura por correspondência exata
+            exact = next(
+                (r for r in matches
+                 if r.get("data") == nf_data and r.get("valor") == nf_valor),
+                None
+            )
+            if exact:
                 encontradas.append(nf)
             else:
-                nf["esperado"] = date_match
-                divergentes.append(nf)
+                nao_encontradas.append(nf)
             continue
 
-        # 3. Se não houver correspondência por número e data, tentar apenas por NÚMERO
-        num_only_match = None
-        for r in relatorio:
-            if r.get("numero") and r["numero"].isdigit() and int(r["numero"]) == num:
-                num_only_match = r
-                break
-
-        if num_only_match:
-            # Encontrou apenas por número. É uma divergência.
-            nf["esperado"] = num_only_match
+        # 4) se há exatamente 1 match, compara normalmente
+        r = matches[0]
+        if r.get("data") == nf_data and r.get("valor") == nf_valor:
+            encontradas.append(nf)
+        else:
+            # aqui há divergência de data ou valor
+            nf["esperado"] = r
             divergentes.append(nf)
-            continue
 
-        # Se não encontrou nenhuma correspondência
-        nao_encontradas.append(nf)
-
-    # O restante da função 'comparar_nfs' permanece inalterado
+    # gera o PDF de saída
     os.makedirs(output_dir, exist_ok=True)
     pdf = os.path.join(output_dir, "relatorio_validacao.pdf")
     gerar_pdf_relatorio(encontradas, divergentes, nao_encontradas, pdf)
@@ -432,14 +416,29 @@ def comparar_nfs(notas_zip, relatorio, output_dir):
         "nao_encontradas": nao_encontradas,
         "pdf": pdf
     }
+    
+def _rm_error_handler(func, path, exc_info):
+    # torna o arquivo gravável e tenta remover de novo
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
 
 def processar_comparacao_nf(zip_path, relatorio_pdf_path, output_dir):
     temp  = os.path.join(os.path.dirname(output_dir), "temp_notas")
+
+    # limpa pastas antigas
+    if os.path.isdir(temp):
+        shutil.rmtree(temp, onerror=_rm_error_handler)
+    if os.path.isdir(output_dir):
+        shutil.rmtree(output_dir, onerror=_rm_error_handler)
+
+    os.makedirs(temp, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+
     notas = extrair_notas_zip(zip_path, temp)
+    rel   = extrair_relatorio_com_pdfplumber(relatorio_pdf_path)
 
-    # usa pdfplumber para extrair o relatório
-    rel = extrair_relatorio_com_pdfplumber(relatorio_pdf_path)
-
-    res = comparar_nfs(notas, rel, output_dir)
-    pdf = res.pop("pdf")
-    return res, pdf
+    # ao invés de “return comparar_nfs(notas, rel, output_dir)”, faça:
+    resultado = comparar_nfs(notas, rel, output_dir)
+    # retira o caminho do PDF do dict e devolve como segundo valor
+    pdf_path = resultado.pop("pdf")
+    return resultado, pdf_path
