@@ -26,35 +26,57 @@ def nf_comparador():
         rar_file = request.files['zip_file']
         pdf_file = request.files['relatorio_pdf']
 
-        # 1) salva os uploads em disco
+        # 1) salva uploads em disco
         rar_path = os.path.join(app.config['UPLOAD_FOLDER'], rar_file.filename)
         pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], pdf_file.filename)
         rar_file.save(rar_path)
         pdf_file.save(pdf_path)
 
-        # 2) processa TUDO num só passo
-        resultado, pdf_path_saida = processar_comparacao_nf(
-            rar_path, pdf_path, app.config['UPLOAD_FOLDER']
-        )
+        # valida
+        if not os.path.isfile(rar_path):
+            flash(f"Não encontrei o arquivo de notas “{rar_file.filename}”.")
+            return redirect(url_for("nf_comparador"))
+        if not os.path.isfile(pdf_path):
+            flash(f"Não encontrei o relatório “{pdf_file.filename}”.")
+            return redirect(url_for("nf_comparador"))
 
-        # 3) guarda só o que precisa na sessão
+        # ** NOVO **: cria um diretório de saída próprio
+        result_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'resultados_nf')
+        os.makedirs(result_dir, exist_ok=True)
+
+        try:
+            resultado, pdf_path_saida = processar_comparacao_nf(
+                rar_path,
+                pdf_path,
+                result_dir
+            )
+        except FileNotFoundError as e:
+            flash(str(e))
+            return redirect(url_for("nf_comparador"))
+        except Exception as e:
+            flash(f"Erro inesperado: {e}")
+            return redirect(url_for("nf_comparador"))
+
         session['resultado']    = resultado
-        session['pdf_filename'] = os.path.basename(pdf_path)
-
+        # salva só o nome do PDF de saída, não do upload original
+        session['pdf_filename'] = os.path.basename(pdf_path_saida)
+        session['result_dir']   = 'resultados_nf'
         return redirect(url_for('nf_comparador'))
 
-    # ==== GET ====
     return render_template(
-      'nf_comparador.html',
-      resultado    = session.get('resultado'),
-      pdf_filename = session.get('pdf_filename'),
+        'nf_comparador.html',
+        resultado    = session.get('resultado'),
+        pdf_filename = session.get('pdf_filename'),
+        result_dir   = session.get('result_dir'),
     )
 
 @app.route('/relatorio-nf-pdf')
 def relatorio_nf_pdf():
-    filename = session.get('pdf_filename')
+    filename   = session.get('pdf_filename')
+    result_dir = session.get('result_dir', '')
+    caminho    = os.path.join(app.config['UPLOAD_FOLDER'], result_dir, filename)
     return send_file(
-        os.path.join(app.config['UPLOAD_FOLDER'], filename),
+        caminho,
         as_attachment=True,
         download_name="relatorio_validacao.pdf"
     )
