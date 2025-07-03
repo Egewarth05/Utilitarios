@@ -67,13 +67,23 @@ def extrair_info_pdf(pdf_path):
     if m:
         data = m.group(1)
     else:
-        # 2) fallback genérico: procura qualquer dd/mm/aaaa no texto todo,
-        #    mas ignora datas em “vencimento”
-        for mm in re.finditer(r"(\d{2}/\d{2}/\d{4})", texto):
-            ctx = texto[max(0, mm.start()-30): mm.start()]
-            if not re.search(r"venci", ctx, re.IGNORECASE):
+        print("→ DATAS ENCONTRADAS PELO FALLBACK:", [m.group(1) for m in re.finditer(r"(\d{2}/\d{2}/\d{4})", texto)])
+        for mm in re.finditer(r"(\d{2}/\d{2}/\d{4})", header_section):
+            ctx = header_section[max(0, mm.start()-30): mm.start()].lower()
+            # pula qualquer data de “venc.” ou “vencimento”
+            if re.search(r"venc", ctx):
+                continue
+            data = mm.group(1)
+            break
+        # 3) se ainda nada, faz o fallback no texto inteiro (caso raro)
+        if not data:
+            for mm in re.finditer(r"(\d{2}/\d{2}/\d{4})", texto):
+                ctx = texto[max(0, mm.start()-30): mm.start()].lower()
+                if re.search(r"venc", ctx):
+                    continue
                 data = mm.group(1)
                 break
+
     # valida ano mínimo 2025
     if data:
         try:
