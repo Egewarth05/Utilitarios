@@ -93,15 +93,6 @@ def extrair_info_pdf(pdf_path):
         except ValueError:
             data = None
 
-    # valida ano mínimo 2025
-    if data:
-        try:
-            dt = datetime.datetime.strptime(data, "%d/%m/%Y")
-            if dt.year < 2025:
-                data = None
-        except ValueError:
-            data = None
-
     # ========== EXTRAÇÃO DO VALOR TOTAL ==========
     # 1) tenta primeiro o label "Valor Total do RPS = R$ ..."
     m_total_rps = re.search(
