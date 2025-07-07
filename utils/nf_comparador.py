@@ -8,7 +8,6 @@ import statistics
 import rarfile
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
-
 import fitz  # PyMuPDF
 import pytesseract
 import pdfplumber
@@ -17,8 +16,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
 # aceita qualquer NFS-e (com ou sem hífen) ou o texto "Nota Fiscal de Serviços"
-PATTERN_NFSE = re.compile(r'(NFS[–—-]?E|Nota\s+Fiscal\s+de\s+Servi(?:ç|c)os)', re.IGNORECASE)
-
+PATTERN_NFSE = re.compile(r'(NFS[–—-]?E|Nota\s+Fiscal\b)', re.IGNORECASE)
 # Configurações externas
 rarfile.UNRAR_TOOL = r"C:\Program Files\UnRAR.exe"
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
@@ -37,26 +35,35 @@ def extrair_info_pdf(pdf_path):
     doc.close()
 
     # rejeita NFe puro que não seja NFSe
-    if re.search(r'\bNFE\b', texto, re.IGNORECASE) and not PATTERN_NFSE.search(texto):
+    if re.search(r'\bNFE\b', texto, re.IGNORECASE) and not re.search(r'NFS[–—-]?E', texto, re.IGNORECASE):
         return None
-    # garante que é NFS-e ou "Nota Fiscal de Serviços"
+    # garante que é alguma Nota Fiscal
     if not PATTERN_NFSE.search(texto):
         return None
 
-    # extrai número da NF pelo nome do arquivo
-    m_num = re.search(r"(\d+)", os.path.basename(pdf_path))
-    numero = m_num.group(1).lstrip("0") if m_num else None
-
-    # isola só o cabeçalho até "DISCRIMINAÇÃO"
-    header_section = re.split(r"(?i)discriminação", texto)[0]
+    # 1) limite o escopo até antes de “Detalhamento dos Tributos”
+    texto_sem_tributos = re.split(r"(?i)Detalhamento\s+dos\s+Tributos", texto)[0]
+    # 2) continue usando discriminação para dividir header x discriminação
+    header_section = re.split(r"(?i)discriminação", texto_sem_tributos)[0]
     header_clean   = re.sub(r"\s+", " ", header_section).strip()
+
+    # extrai número da NF pelo nome do arquivo
+    nome = os.path.basename(pdf_path)
+    m = re.search(r"(\d+)", nome)
+    raw = m.group(1) if m else ""
+    # se raw tiver 4 ou mais zeros seguidos, pega só o que vem depois
+    parts = re.split(r"0{4,}", raw)
+    if len(parts) > 1 and parts[-1]:
+        numero = parts[-1].lstrip("0")
+    else:
+        numero = raw.lstrip("0")
 
     # ========== EXTRAÇÃO DA DATA ==========
     data = None
     # 1) tenta o label completo no texto inteiro
     m = re.search(
         r"Data\s+e\s+Hora\s+de\s+Emissão\D*?(\d{2}/\d{2}/\d{4})",
-        texto, re.IGNORECASE
+        texto_sem_tributos, re.IGNORECASE
     )
     if not m:
         # também cobre variações menos verbosas
@@ -67,12 +74,13 @@ def extrair_info_pdf(pdf_path):
     if m:
         data = m.group(1)
     else:
-        print("→ DATAS ENCONTRADAS PELO FALLBACK:", [m.group(1) for m in re.finditer(r"(\d{2}/\d{2}/\d{4})", texto)])
         for mm in re.finditer(r"(\d{2}/\d{2}/\d{4})", header_section):
-            ctx = header_section[max(0, mm.start()-30): mm.start()].lower()
+            ctx_full = header_section[max(0, mm.start()-30): mm.end()+30]
+            print(f"[DEBUG][FALLBACK] encontrou '{mm.group(1)}' em:\n…{ctx_full}…")
             # pula qualquer data de “venc.” ou “vencimento”
-            if re.search(r"venc", ctx):
+            if re.search(r"venc", ctx_full, re.IGNORECASE):
                 continue
+            # escolhe este se passou no filtro
             data = mm.group(1)
             break
         # 3) se ainda nada, faz o fallback no texto inteiro (caso raro)
@@ -94,59 +102,86 @@ def extrair_info_pdf(pdf_path):
             data = None
 
     # ========== EXTRAÇÃO DO VALOR TOTAL ==========
-    # 1) tenta primeiro o label "Valor Total do RPS = R$ ..."
-    m_total_rps = re.search(
-        r"Valor\s+Total\s+do\s+RPS\s*=\s*R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})",
+    valor_str = None
+
+    # 1) Valor Total da NFS-e (com R$ e dois-pontos)
+    m = re.search(
+        r"Valor\s+Total\s+da\s+NFS[–—-]?e[:\s]*R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})",
         texto, re.IGNORECASE
     )
-    if m_total_rps:
-        valor_str = m_total_rps.group(1)
+    if m:
+        valor_str = m.group(1)
     else:
-        # 2) tenta labels genéricos no header
-        m_val = re.search(
-            r"(?:Valor\s+dos\s+serviços|Valor\s+da\s+nota)\D*?(\d{1,3}(?:\.\d{3})*,\d{2})",
-            header_clean, re.IGNORECASE
+        # 2) Valor Bruto da Nota (caso exista)
+        m = re.search(
+            r"(\d{1,3}(?:\.\d{3})*,\d{2})\s*Valor\s+Bruto\s+da\s+Nota[:\s]",
+            texto, re.IGNORECASE
         )
-        if m_val:
-            valor_str = m_val.group(1)
+        if m:
+            valor_str = m.group(1)
         else:
-            # 3) remove o bloco de "Vencimentos" para não confundir
-            texto_sem_venc = re.sub(
-                r"Vencimentos?:\s*\[.*?\]", "",
-                texto,
-                flags=re.IGNORECASE|re.DOTALL
+            # 3) Valor Total do RPS
+            m = re.search(
+                r"Valor\s+Total\s+do\s+RPS\D*?R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})",
+                texto, re.IGNORECASE
             )
-            # 4) busca valores com "R$"
-            raw_vals = re.findall(r"R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})", texto_sem_venc)
-            # 5) se nada, cai no genérico
-            if not raw_vals:
-                raw_vals = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", texto_sem_venc)
-            valor_str = (
-                max(raw_vals, key=lambda v: Decimal(v.replace(".", "").replace(",", ".")))
-                if raw_vals else None
-            )
+            if m:
+                valor_str = m.group(1)
 
-    # converte string para Decimal e formata
+    # 4) fallback genérico: escolhe o maior valor encontrado
+    if not valor_str:
+        texto_sem_venc = re.sub(r"Vencimentos?:\s*\[.*?\]", "", texto,
+                                flags=re.IGNORECASE|re.DOTALL)
+        raw_vals = re.findall(r"R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})", texto_sem_venc)
+        if not raw_vals:
+            raw_vals = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", texto_sem_venc)
+        if raw_vals:
+            valor_str = max(raw_vals,
+                            key=lambda v: Decimal(v.replace(".", "").replace(",", ".")))
+
+    # converte e retorna
     valor = None
     if valor_str:
-        valor = str(
-            Decimal(valor_str.replace(".", "").replace(",", "."))
-                   .quantize(Decimal("0.01"))
-        )
+        valor = str(Decimal(valor_str.replace(".", "").replace(",", "."))
+                    .quantize(Decimal("0.01")))
 
-    return {"numero": numero, "data": data, "valor": valor}
+    info = {"numero": numero, "data": data, "valor": valor}
+
+    print(f"[DEBUG][NF] {os.path.basename(pdf_path)} → "
+          f"número: {numero!r}, data: {data!r}, valor: {valor!r}")
+    return info
 
 def extrair_notas_zip(zip_path, temp_dir):
     os.makedirs(temp_dir, exist_ok=True)
     with rarfile.RarFile(zip_path) as rar:
         rar.extractall(temp_dir)
+
     notas = []
+    sem_dados = []
+
     for fn in os.listdir(temp_dir):
-        if fn.lower().endswith(".pdf"):
-            info = extrair_info_pdf(os.path.join(temp_dir, fn))
-            if info and info.get("numero") and info.get("valor"):
-                info["arquivo"] = fn
-                notas.append(info)
+        # ** pula qualquer arquivo que tenha 'fatura' no nome **
+        if 'fatura' in fn.lower():
+            print(f"[DEBUG][IGNORADO] pulando '{fn}' pois contém 'fatura'")
+            continue
+
+        if not fn.lower().endswith('.pdf'):
+            continue
+
+        pdf_path = os.path.join(temp_dir, fn)
+        info = extrair_info_pdf(pdf_path)
+
+        if info and info.get("numero") and info.get("valor"):
+            info["arquivo"] = fn
+            notas.append(info)
+        else:
+            sem_dados.append(fn)
+
+    if sem_dados:
+        print(f"[DEBUG][SEM DADOS] PDFs sem extração: {sem_dados}")
+    else:
+        print("[DEBUG][SEM DADOS] Todos os PDFs extraíram dados corretamente.")
+
     return notas
 
 def extrair_relatorio_com_pdfplumber(pdf_path):
@@ -159,7 +194,12 @@ def extrair_relatorio_com_pdfplumber(pdf_path):
                     if any(cell not in (None, "") for cell in row):
                         rows.append([cell or "" for cell in row])
 
-    print(f"[DEBUG][RELATÓRIO] {os.path.basename(pdf_path)} → {len(rows)} linhas")
+    print(f"[DEBUG][RELATÓRIO] {os.path.basename(pdf_path)} → {len(rows)} linhas extraídas")
+    # DEBUG: mostre cabeçalho e primeiras 5 linhas
+    header = [c.replace("\n", " ").strip() for c in rows[0]]
+    sample = rows[1:6]
+    print(f"[DEBUG][RELATÓRIO] Cabeçalho: {header}")
+    print(f"[DEBUG][RELATÓRIO] Primeiras linhas: {sample}")
     if not rows:
         raise ValueError("Nenhuma linha extraída do relatório.")
 
@@ -339,5 +379,11 @@ def processar_comparacao_nf(zip_path, relatorio_pdf_path, output_dir):
     rel   = extrair_relatorio_com_pdfplumber(relatorio_pdf_path)
 
     resultado = comparar_nfs(notas, rel, output_dir)
+    notas.sort(key=lambda n: int(n["numero"]))
+    rel.sort(key=lambda r: int(r["numero"]))
+    resultado["encontradas"].sort(key=lambda n: int(n["numero"]))
+    resultado["divergentes"].sort(key=lambda n: int(n["numero"]))
+    resultado["nao_encontradas"].sort(key=lambda n: int(n["numero"]))
+
     pdf_path  = resultado.pop("pdf")
     return resultado, pdf_path
