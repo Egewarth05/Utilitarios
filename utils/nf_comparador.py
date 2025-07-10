@@ -5,6 +5,11 @@ import stat
 import shutil
 import datetime
 import statistics
+import concurrent.futures
+import subprocess
+from subprocess import run, DEVNULL
+import tempfile
+from concurrent.futures import ProcessPoolExecutor
 import rarfile
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
@@ -22,17 +27,55 @@ rarfile.UNRAR_TOOL = r"C:\Program Files\UnRAR.exe"
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
 
+def pdf_page_to_png_with_gs(pdf_path, page_number=1, dpi=300):
+    """
+    Usa Ghostscript para renderizar a página `page_number` do PDF em PNG
+    e retorna o caminho do .png gerado.
+    """
+    tmp = tempfile.gettempdir()
+    out = os.path.join(tmp, f"gs_page{page_number}.png")
+    args = [
+        "gswin64c", "-dSAFER", "-dBATCH", "-dNOPAUSE",
+        f"-r{dpi}", "-sDEVICE=pngalpha",
+        f"-dFirstPage={page_number}", f"-dLastPage={page_number}",
+        f"-sOutputFile={out}", pdf_path
+    ]
+    run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return out
+
+def ocr_from_png(png_path):
+    try:
+        img = Image.open(png_path).convert("L")
+    except Exception as e:
+        print(f"❌ Falha ao abrir {png_path}: {e}")
+        raise
+    bw = img.point(lambda x: 0 if x < 180 else 255, "1")
+    """
+    Carrega o PNG, aplica binarização simples e devolve o texto OCR.
+    """
+    img = Image.open(png_path).convert("L")
+    bw  = img.point(lambda x: 0 if x < 180 else 255, "1")
+    cfg = r"--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789,\.\/"
+    return pytesseract.image_to_string(bw, lang="por", config=cfg)
+
 def extrair_info_pdf(pdf_path):
-    # abre o PDF e extrai todo o texto (nativo + OCR)
+    # 1) abre PDF e extrai texto "nativo"
     doc = fitz.open(pdf_path)
-    texto = ""
+    nat = ""
+    ocr_text = []
     for page in doc:
-        txt_pdf = page.get_text() or ""
-        pix = page.get_pixmap(dpi=300)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
-        txt_ocr = pytesseract.image_to_string(img, lang='por')
-        texto += txt_pdf + "\n" + txt_ocr + "\n\n"
+        nat += page.get_text() or ""
+
+        # renderiza com PyMuPDF em vez de Ghostscript
+        pix = page.get_pixmap(dpi=300, alpha=False)
+        img = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+        bw  = img.point(lambda x: 0 if x < 180 else 255, "1")
+        cfg = r"--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789,\/"
+        ocr_text.append(pytesseract.image_to_string(bw, lang="por", config=cfg))
+
     doc.close()
+    # monta o texto completo
+    texto = nat + "\n\n" + "\n\n".join(ocr_text)
 
     # rejeita NFe puro que não seja NFSe
     if re.search(r'\bNFE\b', texto, re.IGNORECASE) and not re.search(r'NFS[–—-]?E', texto, re.IGNORECASE):
@@ -45,6 +88,11 @@ def extrair_info_pdf(pdf_path):
     texto_sem_tributos = re.split(r"(?i)Detalhamento\s+dos\s+Tributos", texto)[0]
     # 2) continue usando discriminação para dividir header x discriminação
     header_section = re.split(r"(?i)discriminação", texto_sem_tributos)[0]
+    print("---- RAW HEADER_SECTION ----")
+    print(repr(header_section))
+    print("---- LINHAS ----")
+    for i, l in enumerate(header_section.splitlines()):
+        print(f"{i:02d}: {l!r}")
     header_clean   = re.sub(r"\s+", " ", header_section).strip()
 
     # extrai número da NF pelo nome do arquivo
@@ -58,39 +106,53 @@ def extrair_info_pdf(pdf_path):
     else:
         numero = raw.lstrip("0")
 
-    # ========== EXTRAÇÃO DA DATA ==========
+     # ===== EXTRAÇÃO DA DATA =====
     data = None
-    # 1) tenta o label completo no texto inteiro
-    m = re.search(
-        r"Data\s+e\s+Hora\s+de\s+Emissão\D*?(\d{2}/\d{2}/\d{4})",
-        texto_sem_tributos, re.IGNORECASE
-    )
-    if not m:
-        # também cobre variações menos verbosas
-        m = re.search(
-            r"Data\s+Emissão\D*?(\d{2}/\d{2}/\d{4})",
-            texto, re.IGNORECASE
-        )
+
+    # tenta data+hora em qualquer lugar do texto_sem_tributos
+    m = re.search(r"(\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}:\d{2}",
+                texto_sem_tributos)
     if m:
         data = m.group(1)
-    else:
+
+    # se ainda não achou, tenta outras variações...
+    if not data:
+        m = re.search(r"Data\s+Emissão\D*?(\d{2}/\d{2}/\d{4})",
+                    texto, re.IGNORECASE)
+        if m:
+            data = m.group(1)
+
+    # C) “DD/MM/AAAA HH:MM:SS” sozinho em alguma linha do header
+    if not data:
+        for line in header_section.splitlines():
+            m = re.match(r"\s*(\d{2}/\d{2}/\d{4})\s+\d{2}:\d{2}:\d{2}", line)
+            if m:
+                data = m.group(1)
+                break
+
+    # D) Data da emissão (variação textual)
+    if not data:
+        m = re.search(r"Data\s+da\s+emiss(?:ão|ao)\D*?(\d{2}/\d{2}/\d{4})",
+                    texto, re.IGNORECASE)
+        if m:
+            data = m.group(1)
+        # 5) Fallback 1: primeira data no header (ignorando “venc”)
+    if not data:
         for mm in re.finditer(r"(\d{2}/\d{2}/\d{4})", header_section):
-            ctx_full = header_section[max(0, mm.start()-30): mm.end()+30]
-            print(f"[DEBUG][FALLBACK] encontrou '{mm.group(1)}' em:\n…{ctx_full}…")
-            # pula qualquer data de “venc.” ou “vencimento”
-            if re.search(r"venc", ctx_full, re.IGNORECASE):
+            ctx = header_section[max(0, mm.start()-30): mm.end()+30]
+            if re.search(r"venc", ctx, re.IGNORECASE):
                 continue
-            # escolhe este se passou no filtro
             data = mm.group(1)
             break
-        # 3) se ainda nada, faz o fallback no texto inteiro (caso raro)
-        if not data:
-            for mm in re.finditer(r"(\d{2}/\d{2}/\d{4})", texto):
-                ctx = texto[max(0, mm.start()-30): mm.start()].lower()
-                if re.search(r"venc", ctx):
-                    continue
-                data = mm.group(1)
-                break
+
+    # 6) Fallback 2: última tentativa em todo o texto
+    if not data:
+        for mm in re.finditer(r"(\d{2}/\d{2}/\d{4})", texto):
+            ctx = texto[max(0, mm.start()-30): mm.start()].lower()
+            if re.search(r"venc", ctx):
+                continue
+            data = mm.group(1)
+            break
 
     # valida ano mínimo 2025
     if data:
@@ -100,7 +162,7 @@ def extrair_info_pdf(pdf_path):
                 data = None
         except ValueError:
             data = None
-
+            
     # ========== EXTRAÇÃO DO VALOR TOTAL ==========
     valor_str = None
 
@@ -126,27 +188,47 @@ def extrair_info_pdf(pdf_path):
                 texto, re.IGNORECASE
             )
             if m:
+                valor_str = m.group(1)        
+                
+            elif not valor_str:
+                m = re.search(
+                    r"FATURA\s*/\s*DUPLICATA.*?^\s*\d+\s+\d{2}/\d{2}/\d{4}\s+([\d\.]+,\d{2})",
+                    texto, re.IGNORECASE | re.MULTILINE | re.DOTALL
+                )
+                if m:
+                    valor_str = m.group(1)        
+                
+        # 4) Valor da Nota (demonstrativo)
+        if not valor_str:
+            m = re.search(
+                r"Valor\s+da\s+Nota[:\s]*R\$\s*([\d\.]+,\d{2})",
+                texto, re.IGNORECASE
+            )
+            if m:
                 valor_str = m.group(1)
 
-    # 4) fallback genérico: escolhe o maior valor encontrado
-    if not valor_str:
-        texto_sem_venc = re.sub(r"Vencimentos?:\s*\[.*?\]", "", texto,
-                                flags=re.IGNORECASE|re.DOTALL)
-        raw_vals = re.findall(r"R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})", texto_sem_venc)
-        if not raw_vals:
-            raw_vals = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}", texto_sem_venc)
-        if raw_vals:
-            valor_str = max(raw_vals,
-                            key=lambda v: Decimal(v.replace(".", "").replace(",", ".")))
+        # 5) fallback genérico: escolhe o maior R$ encontrado (ignora “imposto”)
+        if not valor_str:
+            candidates = []
+            for line in texto.splitlines():
+                if re.search(r"R\$\s*[\d\.]+,\d{2}", line, re.IGNORECASE) \
+                and not re.search(r"imposto|iss", line, re.IGNORECASE):
+                    mm = re.search(r"R\$\s*([\d\.]+,\d{2})", line)
+                    if mm:
+                        candidates.append(mm.group(1))
+            if candidates:
+                valor_str = max(
+                    candidates,
+                    key=lambda v: Decimal(v.replace(".", "").replace(",", "."))
+                )
 
-    # converte e retorna
+       # converte e retorna (agora no nível da função, não dentro do if)
     valor = None
     if valor_str:
         valor = str(Decimal(valor_str.replace(".", "").replace(",", "."))
                     .quantize(Decimal("0.01")))
 
     info = {"numero": numero, "data": data, "valor": valor}
-
     print(f"[DEBUG][NF] {os.path.basename(pdf_path)} → "
           f"número: {numero!r}, data: {data!r}, valor: {valor!r}")
     return info
@@ -155,33 +237,27 @@ def extrair_notas_zip(zip_path, temp_dir):
     os.makedirs(temp_dir, exist_ok=True)
     with rarfile.RarFile(zip_path) as rar:
         rar.extractall(temp_dir)
-
-    notas = []
-    sem_dados = []
-
-    for fn in os.listdir(temp_dir):
-        # ** pula qualquer arquivo que tenha 'fatura' no nome **
-        if 'fatura' in fn.lower():
-            print(f"[DEBUG][IGNORADO] pulando '{fn}' pois contém 'fatura'")
-            continue
-
-        if not fn.lower().endswith('.pdf'):
-            continue
-
-        pdf_path = os.path.join(temp_dir, fn)
-        info = extrair_info_pdf(pdf_path)
-
-        if info and info.get("numero") and info.get("valor"):
-            info["arquivo"] = fn
-            notas.append(info)
-        else:
-            sem_dados.append(fn)
-
+    
+    # usa ProcessPoolExecutor para rodar extrair_info_pdf em paralelo
+    pdfs = [
+        os.path.join(temp_dir, fn)
+        for fn in os.listdir(temp_dir)
+        if fn.lower().endswith('.pdf') and 'fatura' not in fn.lower()
+    ]
+    notas, sem_dados = [], []
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
+        futures = { pool.submit(extrair_info_pdf, pdf): pdf for pdf in pdfs }
+        for fut in concurrent.futures.as_completed(futures):
+            pdf = futures[fut]
+            fn = os.path.basename(pdf)
+            info = fut.result()
+            if info and info.get("numero") and info.get("valor"):
+                info["arquivo"] = fn
+                notas.append(info)
+            else:
+                sem_dados.append(fn)
     if sem_dados:
-        print(f"[DEBUG][SEM DADOS] PDFs sem extração: {sem_dados}")
-    else:
-        print("[DEBUG][SEM DADOS] Todos os PDFs extraíram dados corretamente.")
-
+          print(f"[DEBUG][SEM_DADOS] Arquivos sem extração ({len(sem_dados)}): {sem_dados}")
     return notas
 
 def extrair_relatorio_com_pdfplumber(pdf_path):
@@ -304,6 +380,11 @@ def gerar_pdf_relatorio(encontradas, divergentes, nao_encontradas, caminho_saida
 
 def comparar_nfs(notas_zip, relatorio, output_dir):
     encontradas, divergentes, nao_encontradas = [], [], []
+
+    idx = defaultdict(list)
+    for r in relatorio:
+        if r.get("numero","").isdigit():
+            idx[int(r["numero"])].append(r)
 
     for nf in notas_zip:
         num_str = nf.get("numero", "")
