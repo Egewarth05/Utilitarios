@@ -306,7 +306,6 @@ def extrair_relatorio_com_pdfplumber(pdf_path):
 
     return rel
 
-
 def _fallback_extrair(pdf_path):
     import fitz
     rel = []
