@@ -1,29 +1,41 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <title>Utilitários Internos</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <meta charset="UTF-8">
+  <title>Utilitários Internos</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
 <body class="bg-light">
-    <div class="container py-5">
-        <h1 class="text-primary mb-4">🔧 Utilitários Internos</h1>
+  <div class="container py-5">
+    <h1 class="text-primary mb-4">🔧 Utilitários Internos</h1>
 
-        <div class="card mb-3">
-            <div class="card-body">
-                <h4 class="card-title">📁 Comparador de NFs (RAR x PDF)</h4>
-                <p class="card-text">Verifique quais notas estão no RAR mas não no PDF.</p>
-                <a href="{{ url_for('nf_comparador') }}" class="btn btn-outline-primary">Acessar</a>
-            </div>
-        </div>
-
-        <div class="card mb-3">
-            <div class="card-body">
-                <h4 class="card-title">💳 Processador de OFX</h4>
-                <p class="card-text">Adiciona informações úteis ao campo MEMO de extratos bancários.</p>
-                <a href="{{ url_for('ofx_processador') }}" class="btn btn-outline-success">Acessar</a>
-            </div>
-        </div>
+    <!-- Comparador de NFs -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <h4 class="card-title">📁 Comparador de NFs (RAR x PDF)</h4>
+        <p class="card-text">Verifique quais notas estão no RAR mas não no PDF.</p>
+        <a href="{{ url_for('nf_comparador') }}" class="btn btn-outline-primary">Acessar</a>
+      </div>
     </div>
+
+    <!-- Processador de OFX -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <h4 class="card-title">💳 Processador de OFX</h4>
+        <p class="card-text">Adiciona informações úteis ao campo MEMO de extratos bancários.</p>
+        <a href="{{ url_for('ofx_processador') }}" class="btn btn-outline-success">Acessar</a>
+      </div>
+    </div>
+
+    <!-- Processador de Combustível -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <h4 class="card-title">⛽ Processador de Combustível</h4>
+        <p class="card-text">Gera planilha Excel com destaques para gasolina e diesel a partir de CSV.</p>
+        <a href="{{ url_for('combustivel') }}" class="btn btn-outline-warning">Acessar</a>
+      </div>
+    </div>
+
+  </div>
 </body>
 </html>
