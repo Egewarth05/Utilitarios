@@ -6,7 +6,149 @@
   <!-- Bootstrap e FontAwesome para ícones -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"/>
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"/>
+  <style><!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <title>Utilitários Internos</title>
+  <!-- Bootstrap e FontAwesome para ícones -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"/>
   <style>
+    body {
+      background: #0d1117;
+      color: #e1e4e8;
+    }
+    .navbar {
+      background: rgba(0,0,0,0.7);
+    }
+    /* Hero full-screen */
+    .hero {
+      height: 100vh;
+      background: url('/static/img/hero-bg.jpg') center/cover no-repeat;
+      position: relative;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+    }
+    .hero .content {
+      position: relative;
+      z-index: 1;
+    }
+    #tools .card,
+    #tools .card .card-body {
+    color: #ffffff !important;
+    }
+    /* Cards section */
+    #tools .card {
+      background: #161b22;
+      border: none;
+    }
+    #tools .card .btn-outline-light {
+      border-color: #58a6ff;
+      color: #58a6ff;
+    }
+    #tools .card .btn-outline-light:hover {
+      background: #58a6ff;
+      color: #0d1117;
+    }
+    footer {
+      background: #010409;
+      color: #6e7681;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navbar fixa -->
+  <nav class="navbar navbar-expand-lg navbar-dark fixed-top">
+  <div class="container">
+    <a class="navbar-brand d-flex align-items-center" href="#">
+      <!-- Logo esticada (ajuste width/height conforme necessário) -->
+      <img src="{{ url_for('static', filename='img/inatec-logo.png') }}"
+           alt="INATEC"
+           style="height:50px; width:auto; max-width:200px; object-fit:contain;">
+      <!-- Se quiser manter o texto ao lado: -->
+      <span class="ms-3">Utilitários</span>
+    </a>
+    <button class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navMenu">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+      <div class="collapse navbar-collapse" id="navMenu">
+        <ul class="navbar-nav ms-auto">
+          <li class="nav-item"><a class="nav-link" href="#tools">Ferramentas</a></li>
+        </ul>
+      </div>
+    </div>
+  </nav>
+
+    <header class="hero d-flex align-items-center justify-content-center text-center text-white">
+    <div class="content container">
+        <!-- REMOVIDA A LOGO CENTRAL -->
+        <h1 class="display-4 fw-bold">Utilitários Internos</h1>
+        <p class="lead mb-4">Facilitadores de tarefas do escritório</p>
+        <a href="#tools" class="btn btn-primary btn-lg">Ver Ferramentas</a>
+    </div>
+    </header>
+
+  <section id="tools" class="py-5">
+    <div class="container">
+      <div class="row g-4">
+
+        <!-- Comparador NF -->
+        <div class="col-md-4">
+          <div class="card h-100 text-center p-3">
+            <div class="card-body">
+              <i class="fas fa-file-archive fa-3x mb-3 text-primary"></i>
+              <h5 class="card-title">Comparador de NFs</h5>
+              <p class="card-text">Verifique quais notas estão no RAR mas não no PDF.</p>
+              <a href="{{ url_for('nf_comparador') }}" class="btn btn-outline-light">Acessar</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- OFX Processor -->
+        <div class="col-md-4">
+          <div class="card h-100 text-center p-3">
+            <div class="card-body">
+              <i class="fas fa-credit-card fa-3x mb-3 text-success"></i>
+              <h5 class="card-title">Processador de OFX</h5>
+              <p class="card-text">Ajusta OFXs para trazer descrições bancárias.</p>
+              <a href="{{ url_for('ofx_processador') }}" class="btn btn-outline-light">Acessar</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- Combustível Processor -->
+        <div class="col-md-4">
+          <div class="card h-100 text-center p-3">
+            <div class="card-body">
+              <i class="fas fa-gas-pump fa-3x mb-3 text-warning"></i>
+              <h5 class="card-title">Filtro de Combustível</h5>
+              <p class="card-text">Gera planilha Excel com destaques de gasolina e diesel - SCHROEDER.</p>
+              <a href="{{ url_for('combustivel') }}" class="btn btn-outline-light">Acessar</a>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer simples -->
+  <footer id="contact" class="py-4 text-center">
+    <div class="container">
+      <small>© 2025 Jean Egewarth</small>
+    </div>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+
     body {
       background: #0d1117;
       color: #e1e4e8;
