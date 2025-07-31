@@ -1,12 +1,17 @@
-from flask import Flask, render_template, request, send_file, redirect, url_for, flash, session
+from flask import Flask, render_template, request, send_file, send_from_directory, redirect, url_for, flash, session
 from flask_session import Session
 import os
+import tempfile
+import traceback
+from werkzeug.utils import secure_filename
 from utils.nf_comparador import processar_comparacao_nf
 from utils.combustivel_processador import processar_combustivel 
 from utils.ofx_processador import processar_ofx  
 from utils.nf_comparador import extrair_notas_zip, extrair_relatorio, comparar_nfs
+import json
 
 app = Flask(__name__)
+SETTINGS_PATH = os.path.join(app.root_path, 'combustivel_settings.json')
 app.config['SESSION_TYPE']      = 'filesystem'
 app.config['SESSION_FILE_DIR']  = './flask_session'
 app.config['SESSION_PERMANENT'] = False
@@ -93,21 +98,118 @@ def download_relatorio(filename):
 
 @app.route("/ofx-processador", methods=["GET", "POST"])
 def ofx_processador():
-    resultado = None
-    if request.method == 'POST':
-        banco = request.form.get('banco')
-        arquivo = request.files.get('ofx_file')
-        if not banco or not arquivo:
-            return render_template('ofx_processador.html', erro="Preencha todos os campos.")
+    debug = None
 
-        ofx_path = os.path.join(app.config['UPLOAD_FOLDER'], arquivo.filename)
+    if request.method == "POST":
+        banco   = request.form.get("banco")
+        arquivo = request.files.get("ofx_file")
+
+        # monte a string de debug
+        debug = f"DEBUG → banco: {banco!r} | filename: {getattr(arquivo, 'filename', None)!r}"
+
+        # validação: banco e nome do arquivo não podem estar vazios
+        if not banco or not arquivo or arquivo.filename == "":
+            return render_template(
+                "ofx_processador.html",
+                erro="Preencha todos os campos.",
+                debug=debug
+            )
+
+        # salva e processa
+        ofx_path = os.path.join(app.config["UPLOAD_FOLDER"], arquivo.filename)
         arquivo.save(ofx_path)
+        base, ext       = os.path.splitext(arquivo.filename)
+        output_filename = f"{base}_modificado{ext}"
+        output_path     = os.path.join(app.config["UPLOAD_FOLDER"], output_filename)
+        processar_ofx(ofx_path, output_path, banco)
 
-        output_path = ofx_path.replace('.ofx', '_modificado.ofx')
-        processar_ofx(banco, ofx_path, output_path)
-        return send_file(output_path, as_attachment=True)
+        return send_file(
+            output_path,
+            as_attachment=True,
+            download_name=output_filename
+        )
 
-    return render_template('ofx_processador.html')
+    # GET — renderiza sem erro, mas ainda passa debug (None)
+    return render_template(
+        "ofx_processador.html",
+        erro=None,
+        debug=debug
+    )
+
+@app.route('/combustivel', methods=['GET', 'POST'])
+def combustivel():
+    # 1) Carrega defaults do JSON
+    defaults = {'gasolina': '', 'diesel': ''}
+    if os.path.exists(SETTINGS_PATH):
+        try:
+            with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+                defaults.update(json.load(f))
+        except:
+            pass
+
+    if request.method == 'POST':
+        vg = request.form.get('gasolina')
+        vd = request.form.get('diesel')
+        file = request.files.get('csv_file')
+
+        if not vg or not vd or not file:
+            flash('Preencha todos os campos e escolha um CSV.')
+            return redirect(request.url)
+
+        # 2) Salva os novos defaults
+        try:
+            with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
+                json.dump({'gasolina': vg, 'diesel': vd}, f)
+        except Exception as e:
+            flash(f'Não foi possível salvar as configurações: {e}')
+            # mas continua o processamento mesmo assim
+
+        # 3) Cria pasta temporária e salva CSV
+        tmp_dir = tempfile.mkdtemp()
+        session['tmp_dir'] = tmp_dir
+        nome_csv = secure_filename(file.filename)
+        csv_path = os.path.join(tmp_dir, nome_csv)
+        file.save(csv_path)
+
+        # 4) Define saída e processa
+        nome_xlsx = 'relatorio_combustivel.xlsx'
+        out_path  = os.path.join(tmp_dir, nome_xlsx)
+        try:
+            processar_combustivel(csv_path, vg, vd, out_path)
+        except Exception as e:
+            print(traceback.format_exc())
+            flash(f'Erro no processamento: {e}')
+            return redirect(request.url)
+
+        # 5) Renderiza com sucesso, repassando os defaults para manter no form
+        return render_template(
+            'combustivel.html',
+            resultado=True,
+            arquivo_saida=nome_xlsx,
+            default_gasolina=vg,
+            default_diesel=vd
+        )
+
+    # GET — só renderiza, passando os defaults lidos
+    return render_template(
+        'combustivel.html',
+        default_gasolina=defaults['gasolina'],
+        default_diesel=defaults['diesel']
+    )
+
+@app.route('/combustivel/download/<filename>')
+def download_combustivel(filename):
+    # Serve o arquivo gerado na pasta temporária
+    tmp_dir = session.get('tmp_dir')
+    if not tmp_dir:
+        flash('Nenhum relatório disponível para download.')
+        return redirect(url_for('combustivel'))
+    return send_from_directory(
+        directory=tmp_dir,
+        path=filename,
+        as_attachment=True
+    )
+
 
 if __name__ == '__main__':
     app.run(debug=True)
