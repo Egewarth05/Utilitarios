@@ -10,6 +10,8 @@ from utils.ofx_processador import processar_ofx
 from utils.folha_processador import process_sheet # CORREÇÃO AQUI: importe process_sheet
 from utils.nf_comparador import extrair_notas_zip, extrair_relatorio, comparar_nfs
 import json
+import os
+import subprocess
 
 app = Flask(__name__)
 SETTINGS_PATH = os.path.join(app.root_path, 'combustivel_settings.json')
@@ -25,6 +27,43 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 @app.route("/", methods=["GET"])
 def index():
     return render_template("index.html")
+
+@app.route('/pagamentos', methods=['GET', 'POST'])
+def pagamentos_processador():
+    message = None
+    download_link = None
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            message = 'Nenhum arquivo enviado.'
+            return render_template('pagamentos.html', message=message)
+
+        file = request.files['file']
+        if file.filename == '':
+            message = 'Nenhum arquivo selecionado.'
+            return render_template('pagamentos.html', message=message)
+
+        if file:
+            # Salvar o arquivo de entrada temporariamente
+            input_filepath = os.path.join(app.config['UPLOAD_FOLDER'], 'pagamentos_entrada.xlsx')
+            file.save(input_filepath)
+
+            # Definir o caminho do arquivo de saída
+            output_filename = 'pagamentos_processados_final.xlsx'
+            output_filepath = os.path.join(app.config['DOWNLOAD_FOLDER'], output_filename)
+
+            try:
+                subprocess.run(['python', 'processar_pagamentos.py', input_filepath, output_filepath], check=True)
+                
+                message = 'Arquivo processado com sucesso!'
+                download_link = url_for('download_file', filename=output_filename)
+            except subprocess.CalledProcessError as e:
+                message = f'Erro ao processar o arquivo: {e}'
+            except FileNotFoundError:
+                message = 'Erro: o script "processar_pagamentos.py" não foi encontrado. Verifique o caminho.'
+            except Exception as e:
+                message = f'Ocorreu um erro inesperado: {e}'
+
+    return render_template('pagamentos.html', message=message, download_link=download_link)
 
 @app.route("/folha-pagamento", methods=["GET", "POST"])
 def folha_pagamento():
@@ -55,7 +94,6 @@ def folha_pagamento():
                 output_txt_name = f"{base_name}_processado.txt"
                 output_txt_path = os.path.join(tmp_dir, output_txt_name)
 
-            # 3) Chama a função principal de processamento CORRIGIDO AQUI
             process_sheet(csv_path, output_xlsx_path, output_txt_path)
 
             session['output_xlsx_name'] = output_xlsx_name
