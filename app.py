@@ -5,8 +5,9 @@ import tempfile
 import traceback
 from werkzeug.utils import secure_filename
 from utils.nf_comparador import processar_comparacao_nf
-from utils.combustivel_processador import processar_combustivel 
-from utils.ofx_processador import processar_ofx  
+from utils.combustivel_processador import processar_combustivel
+from utils.ofx_processador import processar_ofx
+from utils.folha_processador import process_sheet # CORREÇÃO AQUI: importe process_sheet
 from utils.nf_comparador import extrair_notas_zip, extrair_relatorio, comparar_nfs
 import json
 
@@ -25,6 +26,66 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 def index():
     return render_template("index.html")
 
+@app.route("/folha-pagamento", methods=["GET", "POST"])
+def folha_pagamento():
+    if request.method == "POST":
+        csv_file = request.files.get("csv_file")
+        generate_txt = request.form.get("generate_txt") == "on"
+
+        if not csv_file or csv_file.filename == "":
+            flash("Por favor, selecione um arquivo CSV.", "danger") # Adicionado categoria para o flash
+            return redirect(request.url)
+
+        try:
+            # 1) Salva o arquivo CSV temporariamente
+            tmp_dir = tempfile.mkdtemp()
+            session['tmp_dir_folha'] = tmp_dir
+            nome_csv = secure_filename(csv_file.filename)
+            csv_path = os.path.join(tmp_dir, nome_csv)
+            csv_file.save(csv_path)
+
+            # 2) Define os caminhos de saída
+            base_name = os.path.splitext(nome_csv)[0]
+            output_xlsx_name = f"{base_name}_processado.xlsx"
+            output_xlsx_path = os.path.join(tmp_dir, output_xlsx_name)
+
+            output_txt_name = None 
+            output_txt_path = None
+            if generate_txt:
+                output_txt_name = f"{base_name}_processado.txt"
+                output_txt_path = os.path.join(tmp_dir, output_txt_name)
+
+            # 3) Chama a função principal de processamento CORRIGIDO AQUI
+            process_sheet(csv_path, output_xlsx_path, output_txt_path)
+
+            session['output_xlsx_name'] = output_xlsx_name
+            session['output_txt_name'] = output_txt_name if generate_txt else None
+            flash("Folha de pagamento processada com sucesso!", "success")
+            return render_template(
+                'folha_processador.html',
+                resultado=True,
+                output_xlsx_name=output_xlsx_name,
+                output_txt_name=output_txt_name
+            )
+        except Exception as e:
+            print(traceback.format_exc())
+            flash(f"Erro ao processar a folha de pagamento: {e}", "danger")
+            return redirect(request.url)
+
+    return render_template("folha_processador.html")
+
+@app.route('/folha-pagamento/download/<filename>')
+def download_folha_pagamento(filename):
+    tmp_dir = session.get('tmp_dir_folha')
+    if not tmp_dir or not os.path.exists(os.path.join(tmp_dir, filename)):
+        flash('Nenhum relatório disponível para download ou arquivo não encontrado.', 'danger')
+        return redirect(url_for('folha_pagamento'))
+    return send_from_directory(
+        directory=tmp_dir,
+        path=filename,
+        as_attachment=True
+    )
+
 @app.route('/nf-comparador', methods=['GET','POST'])
 def nf_comparador():
     if request.method == 'POST':
@@ -39,10 +100,10 @@ def nf_comparador():
 
         # valida
         if not os.path.isfile(rar_path):
-            flash(f"Não encontrei o arquivo de notas “{rar_file.filename}”.")
+            flash(f"Não encontrei o arquivo de notas “{rar_file.filename}”.", "danger")
             return redirect(url_for("nf_comparador"))
         if not os.path.isfile(pdf_path):
-            flash(f"Não encontrei o relatório “{pdf_file.filename}”.")
+            flash(f"Não encontrei o relatório “{pdf_file.filename}”.", "danger")
             return redirect(url_for("nf_comparador"))
 
         # ** NOVO **: cria um diretório de saída próprio
@@ -56,10 +117,10 @@ def nf_comparador():
                 result_dir
             )
         except FileNotFoundError as e:
-            flash(str(e))
+            flash(str(e), "danger")
             return redirect(url_for("nf_comparador"))
         except Exception as e:
-            flash(f"Erro inesperado: {e}")
+            flash(f"Erro inesperado: {e}", "danger")
             return redirect(url_for("nf_comparador"))
 
         session['resultado']    = resultado
@@ -153,7 +214,7 @@ def combustivel():
         file = request.files.get('csv_file')
 
         if not vg or not vd or not file:
-            flash('Preencha todos os campos e escolha um CSV.')
+            flash('Preencha todos os campos e escolha um CSV.', "danger")
             return redirect(request.url)
 
         # 2) Salva os novos defaults
@@ -161,7 +222,7 @@ def combustivel():
             with open(SETTINGS_PATH, 'w', encoding='utf-8') as f:
                 json.dump({'gasolina': vg, 'diesel': vd}, f)
         except Exception as e:
-            flash(f'Não foi possível salvar as configurações: {e}')
+            flash(f'Não foi possível salvar as configurações: {e}', "danger")
             # mas continua o processamento mesmo assim
 
         # 3) Cria pasta temporária e salva CSV
@@ -178,7 +239,7 @@ def combustivel():
             processar_combustivel(csv_path, vg, vd, out_path)
         except Exception as e:
             print(traceback.format_exc())
-            flash(f'Erro no processamento: {e}')
+            flash(f'Erro no processamento: {e}', "danger")
             return redirect(request.url)
 
         # 5) Renderiza com sucesso, repassando os defaults para manter no form
@@ -202,7 +263,7 @@ def download_combustivel(filename):
     # Serve o arquivo gerado na pasta temporária
     tmp_dir = session.get('tmp_dir')
     if not tmp_dir:
-        flash('Nenhum relatório disponível para download.')
+        flash('Nenhum relatório disponível para download.', "danger")
         return redirect(url_for('combustivel'))
     return send_from_directory(
         directory=tmp_dir,
