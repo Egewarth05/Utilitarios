@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Processador de Pagamentos</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f4f4f4;
+        }
+        .container {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            max-width: 600px;
+            margin: auto;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin-top: 20px;
+        }
+        input[type="file"] {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        input[type="submit"] {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        input[type="submit"]:hover {
+            background-color: #0056b3;
+        }
+        .message {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .message.success {
+            background-color: #d4edda;
+            color: #155724;
+            border-color: #c3e6cb;
+        }
+        .message.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border-color: #f5c6cb;
+        }
+        .back-link {
+            display: block;
+            text-align: center;
+            margin-top: 20px;
+            text-decoration: none;
+            color: #007bff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Processador de Pagamentos</h1>
+        <p>Faça o upload do arquivo Excel de pagamentos para processar.</p>
+
+        <form action="/pagamentos" method="post" enctype="multipart/form-data">
+            <label for="file">Selecione o arquivo Excel:</label>
+            <input type="file" name="file" id="file" accept=".xlsx" required>
+            <input type="submit" value="Processar">
+        </form>
+
+        {% if message %}
+            <div class="message {{ 'success' if 'sucesso' in message else 'error' }}">
+                {{ message }}
+            </div>
+        {% endif %}
+
+        {% if download_link %}
+            <div class="message success">
+                <p>Processamento concluído!</p>
+                <p><a href="{{ download_link }}" download>Clique aqui para baixar o arquivo processado</a></p>
+            </div>
+        {% endif %}
+
+        <a href="/" class="back-link">Voltar para a página inicial</a>
+    </div>
+</body>
+</html>
