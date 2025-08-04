@@ -22,17 +22,29 @@ Session(app)
 
 app.secret_key = 'Ic04854@'
 app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['DOWNLOAD_FOLDER'] = 'uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 @app.route("/", methods=["GET"])
 def index():
     return render_template("index.html")
 
+@app.route('/download_geral/<filename>') # Use um nome diferente para evitar conflitos
+def download_geral(filename):
+    # Certifique-se de que o DOWNLOAD_FOLDER esteja configurado
+    # e que o arquivo exista dentro dele.
+    return send_from_directory(
+        directory=app.config['DOWNLOAD_FOLDER'],
+        path=filename,
+        as_attachment=True
+    )
+
 @app.route('/pagamentos', methods=['GET', 'POST'])
 def pagamentos_processador():
     message = None
     download_link = None
     if request.method == 'POST':
+        notes = request.form.get('notes', '').strip()
         if 'file' not in request.files:
             message = 'Nenhum arquivo enviado.'
             return render_template('pagamentos.html', message=message)
@@ -43,19 +55,33 @@ def pagamentos_processador():
             return render_template('pagamentos.html', message=message)
 
         if file:
-            # Salvar o arquivo de entrada temporariamente
-            input_filepath = os.path.join(app.config['UPLOAD_FOLDER'], 'pagamentos_entrada.xlsx')
+            # Salvar o arquivo de entrada
+            filename_secure = secure_filename(file.filename)
+            input_filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename_secure)
             file.save(input_filepath)
 
-            # Definir o caminho do arquivo de saída
+            # salva os apontamentos em .txt ao lado
+            notes_path = input_filepath + ".notes.txt"
+            try:
+                with open(notes_path, "w", encoding="utf-8") as f:
+                    f.write(notes)
+            except Exception as e:
+                # não impede o processamento, só avisa
+                print(f"Falha ao salvar apontamentos: {e}")
+
+            # Define o caminho do arquivo de saída
             output_filename = 'pagamentos_processados_final.xlsx'
             output_filepath = os.path.join(app.config['DOWNLOAD_FOLDER'], output_filename)
 
             try:
-                subprocess.run(['python', 'processar_pagamentos.py', input_filepath, output_filepath], check=True)
-                
+                # Chamada adaptada: seu script aceita entrada e saída como args
+                subprocess.run(
+                    ['python', 'processar_pagamentos.py', input_filepath, output_filepath],
+                    check=True
+                )
+
                 message = 'Arquivo processado com sucesso!'
-                download_link = url_for('download_file', filename=output_filename)
+                download_link = url_for('download_geral', filename=output_filename)
             except subprocess.CalledProcessError as e:
                 message = f'Erro ao processar o arquivo: {e}'
             except FileNotFoundError:
