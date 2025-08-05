@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, send_file, send_from_directory, redirect, url_for, flash, session
 from flask_session import Session
-import os
+import sys
 import tempfile
 import traceback
 from werkzeug.utils import secure_filename
@@ -24,6 +24,7 @@ app.secret_key = 'Ic04854@'
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['DOWNLOAD_FOLDER'] = 'uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['DOWNLOAD_FOLDER'], exist_ok=True)
 
 @app.route("/", methods=["GET"])
 def index():
@@ -41,55 +42,61 @@ def download_geral(filename):
 
 @app.route('/pagamentos', methods=['GET', 'POST'])
 def pagamentos_processador():
-    message = None
+    error = None
+    success = None
     download_link = None
+
     if request.method == 'POST':
-        notes = request.form.get('notes', '').strip()
-        if 'file' not in request.files:
-            message = 'Nenhum arquivo enviado.'
-            return render_template('pagamentos.html', message=message)
-
-        file = request.files['file']
-        if file.filename == '':
-            message = 'Nenhum arquivo selecionado.'
-            return render_template('pagamentos.html', message=message)
-
-        if file:
-            # Salvar o arquivo de entrada
+        # O template usa name="excel"
+        file = request.files.get('excel')
+        if not file or file.filename == '':
+            error = 'Nenhum arquivo selecionado.'
+        else:
             filename_secure = secure_filename(file.filename)
             input_filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename_secure)
             file.save(input_filepath)
 
-            # salva os apontamentos em .txt ao lado
-            notes_path = input_filepath + ".notes.txt"
-            try:
-                with open(notes_path, "w", encoding="utf-8") as f:
-                    f.write(notes)
-            except Exception as e:
-                # não impede o processamento, só avisa
-                print(f"Falha ao salvar apontamentos: {e}")
-
-            # Define o caminho do arquivo de saída
             output_filename = 'pagamentos_processados_final.xlsx'
             output_filepath = os.path.join(app.config['DOWNLOAD_FOLDER'], output_filename)
 
+            # caminho absoluto customizado (ajuste conforme necessário)
+            script_path = os.path.join(app.root_path, 'utils', 'processar_pagamentos.py')
+
+            if not os.path.isfile(script_path):
+                error = f"Script de processamento não encontrado em: {script_path}"
+                print(error)
+                return render_template('pagamentos.html', error=error, success=None, download_link=None)
+
+            if os.path.exists(output_filepath):
+                os.remove(output_filepath)
+
             try:
-                # Chamada adaptada: seu script aceita entrada e saída como args
-                subprocess.run(
-                    ['python', 'processar_pagamentos.py', input_filepath, output_filepath],
-                    check=True
+                result = subprocess.run(
+                    [sys.executable, script_path, input_filepath, output_filepath],
+                    capture_output=True,
+                    text=True
                 )
-
-                message = 'Arquivo processado com sucesso!'
-                download_link = url_for('download_geral', filename=output_filename)
-            except subprocess.CalledProcessError as e:
-                message = f'Erro ao processar o arquivo: {e}'
+                print("stdout>", result.stdout)
+                print("stderr>", result.stderr)
+                
+                # Se o script retornou erro ou não gerou o arquivo, trata como falha
+                if result.returncode != 0:
+                    detalhes = (result.stderr or result.stdout).strip()
+                    error = f'Erro ao processar o arquivo: {detalhes}'
+                    print("processar_pagamentos.py falhou:", detalhes)
+                elif not os.path.exists(output_filepath):
+                    error = 'O script rodou mas não gerou o arquivo de saída.' 
+                    print("Aviso: saída esperada não encontrada em", output_filepath)
+                else:
+                    success = 'Arquivo processado com sucesso!'
+                    download_link = url_for('download_geral', filename=output_filename)
+                    print("processar_pagamentos.py saída:", result.stdout)
             except FileNotFoundError:
-                message = 'Erro: o script "processar_pagamentos.py" não foi encontrado. Verifique o caminho.'
+                error = 'Erro: o script "processar_pagamentos.py" não foi encontrado. Verifique o caminho.'
             except Exception as e:
-                message = f'Ocorreu um erro inesperado: {e}'
+                error = f'Ocorreu um erro inesperado: {e}'
 
-    return render_template('pagamentos.html', message=message, download_link=download_link)
+    return render_template('pagamentos.html', error=error, success=success, download_link=download_link)
 
 @app.route("/folha-pagamento", methods=["GET", "POST"])
 def folha_pagamento():
