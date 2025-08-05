@@ -1,13 +1,17 @@
 import pandas as pd
 import os
+import difflib
+import sys
+import re
 
-# --- Configurações ---
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 # Nome do arquivo Excel principal que contém todas as abas.
 NOME_ARQUIVO_EXCEL_PRINCIPAL = 'Relat cont_bil.xlsx'
 
 # Nomes exatos das abas (sheets) dentro do arquivo Excel que você quer processar.
 NOME_ABA_ESQUADRIAS = 'Pagamentos com NF Esquadrias'
-NOME_ABA_FERRO_NOBRE = 'Paamentos com NF Ferro Nobre' # Corrigido: "Paamentos"
+POSSIVEIS_FERRO_NOBRE = ['Pagamentos com NF Ferro Nobre', 'Paamentos com NF Ferro Nobre']
 
 HEADER_ROW_ESQUADRIAS = 3
 HEADER_ROW_FERRO_NOBRE = 1 
@@ -161,29 +165,77 @@ CODIGOS_FORNECEDORES = {
     
 }
 
+def normalize_name(s):
+    return re.sub(r'\s+', ' ', str(s).strip().upper())
+
+# versão normalizada para lookup mais robusto
+CODIGOS_FORNECEDORES_NORMALIZADO = {
+    normalize_name(k): v for k, v in CODIGOS_FORNECEDORES.items()
+}
+
+def fuzzy_match_column(target, candidates, cutoff=0.6):
+    target_norm = re.sub(r'[\W_]+', '', target).lower()
+    best = None
+    best_score = 0
+    for c in candidates:
+        c_norm = re.sub(r'[\W_]+', '', c).lower()
+        score = difflib.SequenceMatcher(None, target_norm, c_norm).ratio()
+        if score > best_score:
+            best_score = score
+            best = c
+    if best_score >= cutoff:
+        return best
+    return None
+
+def detectar_header(df_path, sheet_name, dtypes, esperados, max_scan=8):
+    for header_row in range(0, max_scan):
+        try:
+            df_try = pd.read_excel(df_path, sheet_name=sheet_name, header=header_row, dtype=dtypes)
+        except Exception:
+            continue
+        cols = [str(c).strip() for c in df_try.columns]
+        matches = sum(1 for e in esperados if fuzzy_match_column(e, cols))
+        if matches >= 2:  # heurística mínima
+            print(f"Usando header_row={header_row} para '{sheet_name}' com {matches} matches.")
+            return df_try
+    print(f"Não encontrou header consistente em '{sheet_name}', usando row 0 como fallback.")
+    return pd.read_excel(df_path, sheet_name=sheet_name, header=0, dtype=dtypes)
+
 def processar_dados_sheet(df, original_cols_map, sheet_name):
-    """
-    Processa um DataFrame de uma única aba:
-    - Limpa espaços em branco dos nomes das colunas.
-    - Verifica a existência das colunas necessárias.
-    - Seleciona, renomeia e formata as colunas.
-    """
     print(f"Processando dados da aba: '{sheet_name}'...")
 
-    # Limpa espaços em branco dos nomes das colunas imediatamente após a leitura
-    df.columns = df.columns.str.strip()
+    # limpa nomes brutos
+    df.columns = df.columns.astype(str).str.strip()
 
-    # Verifica se as colunas necessárias estão no DataFrame
-    for col_original in original_cols_map.keys():
-        if col_original not in df.columns:
-            print(f"ERRO: Na aba '{sheet_name}', a coluna original '{col_original}' não foi encontrada.")
-            print(f"Colunas encontradas após limpeza: {df.columns.tolist()}")
-            return None
+    # se faltam colunas exatas, tenta fazer fuzzy match
+    mapped_columns = {}
+    for orig in original_cols_map.keys():
+        if orig in df.columns:
+            mapped_columns[orig] = orig
+        else:
+            # tenta match aproximado entre os cabeçalhos disponíveis
+            match = fuzzy_match_column(orig, df.columns.tolist())
+            if match:
+                print(f"⚠️ Cabeçalho '{orig}' não encontrado exatamente em '{sheet_name}', usando aproximação '{match}'.")
+                mapped_columns[orig] = match
+            else:
+                print(f"ERRO: Na aba '{sheet_name}', a coluna original '{orig}' não foi encontrada nem aproximada.")
+                # não retorna de imediato: permite montar com colunas faltantes
+                mapped_columns[orig] = None
 
-    # Seleciona as colunas desejadas e as renomeia
-    colunas_para_selecionar = list(original_cols_map.keys())
-    df_final = df[colunas_para_selecionar].copy()
-    df_final.rename(columns=original_cols_map, inplace=True)
+    # seleciona e renomeia: cria df_final com colunas disponíveis
+    df_final = pd.DataFrame()
+    for orig, new_name in original_cols_map.items():
+        source_col = mapped_columns.get(orig)
+        if source_col and source_col in df.columns:
+            df_final[new_name] = df[source_col]
+        else:
+            # coluna faltante: preenche com vazio (ou 0 se for valor)
+            if new_name in ['Valor']:
+                df_final[new_name] = 0
+            else:
+                df_final[new_name] = ''
+            print(f"[WARN] Coluna '{new_name}' não encontrada: preenchida com padrão.")
 
     # --- Tratamento e Formatação dos Dados ---
 
@@ -193,20 +245,25 @@ def processar_dados_sheet(df, original_cols_map, sheet_name):
 
     # Tratamento robusto de valores com vírgula como separador decimal (formato BR)
     df_valor = df_final['Valor'].astype(str).str.strip()
-
-    # Se contém vírgula, então é BR (ex: 2.020,83)
     df_valor = df_valor.apply(lambda x: x.replace('.', '').replace(',', '.') if ',' in x else x)
-
     df_final['Valor'] = pd.to_numeric(df_valor, errors='coerce').fillna(0).apply(lambda x: f"{x:.2f}")
 
     # 3. Coluna 'Documento' (CNPJ/CPF)
     df_final['Documento'] = df_final['Documento'].astype(str).str.strip()
     df_final['Documento'] = df_final['Documento'].str.replace(r'[./-]', '', regex=True)
-    
-    # 4. Coluna 'Código' com base no dicionário
-    df_final['Código'] = df_final['Fornecedor'].map(CODIGOS_FORNECEDORES).fillna('NÃO DEFINIDO')
-    # 5. Remover fornecedores que começam com SICOOB, MUNICÍPIO ou MINISTÉRIO
-    df_final = df_final[~df_final['Fornecedor'].str.upper().str.startswith(('SICOOB', 'MUNICIPIO', 'MINISTERIO', 'VIVO', 'NEDEL', 'SECRETARIA', 'TUNAPOLIS', 'INMETRO'))]
+
+    # garante string e normaliza fornecedor para lookup
+    df_final['Fornecedor'] = df_final['Fornecedor'].fillna('').astype(str)
+    df_final['Fornecedor_NORM'] = df_final['Fornecedor'].apply(normalize_name)
+    df_final['Código'] = df_final['Fornecedor_NORM'].map(CODIGOS_FORNECEDORES_NORMALIZADO).fillna('NÃO DEFINIDO')
+    # opcional: remover coluna auxiliar se não quiser mantê-la
+    df_final.drop(columns=['Fornecedor_NORM'], inplace=True)
+
+    # exclusão robusta de fornecedores indesejados (trata NaN e normaliza)
+    mask_excluir = df_final['Fornecedor'].fillna('').astype(str).str.upper().str.startswith((
+        'SICOOB', 'MUNICIPIO', 'MINISTERIO', 'VIVO', 'NEDEL', 'SECRETARIA', 'TUNAPOLIS', 'INMETRO'
+    ))
+    df_final = df_final[~mask_excluir]
 
     return df_final
 
@@ -234,105 +291,109 @@ def gerar_planilhas_convertidas(processed_dfs, arquivo_saida):
             else:
                 df['CodigoLimpo'] = df['Código'].apply(lambda x: str(int(float(x))).zfill(7) if pd.notna(x) and str(x).strip().lower() != 'não definido' else "0000000")
 
-            # Constrói a linha final convertida
-            df['Linha Convertida'] = df.apply(lambda row: ",".join([
-                "1",
-                row["Data"],
-                row["CodigoLimpo"],
-                "5",
-                row["Valor"].replace(",", "."),
-                "337",
-                f'"{row["Fornecedor"]} - {row["Documento"]} - {row["Centro de Custo"]}"'
-            ]), axis=1)
-
+            df['Linha Convertida'] = df.apply(
+                lambda row: ",".join([
+                    "1",
+                    row["Data"],
+                    row["CodigoLimpo"],
+                    "5",
+                    row["Valor"].replace(",", "."),
+                    "337",
+                    f'"{row["Fornecedor"]} - {row["Documento"]} - {row["Centro de Custo"]}"'
+                ]),
+                axis=1
+            )
             # Salva apenas a coluna final convertida
             df[['Linha Convertida']].to_excel(writer, sheet_name=nome_convertido, index=False, header=False)
             print(f"Aba '{nome_convertido}' criada com sucesso.")
 
+def carregar_sheet_com_header_detectado(caminho, sheet_name, dtypes, esperados, max_scan=8):
+    """
+    Tenta ler a sheet com header em várias linhas, escolhendo aquela
+    que corresponde melhor aos nomes esperados.
+    """
+    for header_row in range(max_scan):
+        try:
+            df_try = pd.read_excel(
+                caminho,
+                sheet_name=sheet_name,
+                header=header_row,
+                dtype=dtypes,
+            )
+        except Exception:
+            continue
+        cols = [str(c).strip() for c in df_try.columns]
+        # conta quantos esperados “batem” (por fuzzy match ou exato)
+        matches = sum(
+            1
+            for exp in esperados
+            if exp in cols or fuzzy_match_column(exp, cols)
+        )
+        if matches >= 2:  # achou pelo menos 2 colunas-chave
+            print(f"→ Usando header_row={header_row} em '{sheet_name}' ({matches} matches)")
+            return df_try
+    # fallback
+    print(f"⚠️ Não detectou header automático em '{sheet_name}', usando header_row=0")
+    return pd.read_excel(caminho, sheet_name=sheet_name, header=0, dtype=dtypes)
+
 def processar_planilha_pagamentos_separado():
-    """
-    Função principal:
-    Lê o arquivo Excel, processa cada aba de interesse separadamente,
-    e salva os resultados em um novo arquivo Excel com abas distintas.
-    Suporta o caso em que apenas uma das abas existe (processa só a que estiver presente).
-    """
-    if not os.path.exists(NOME_ARQUIVO_EXCEL_PRINCIPAL):
-        print(f"ERRO: O arquivo Excel principal '{NOME_ARQUIVO_EXCEL_PRINCIPAL}' não foi encontrado na pasta do script.")
-        print("Por favor, verifique se o nome está correto e se o arquivo está na mesma pasta.")
-        return
+    processed_dfs = {}
 
-    processed_dfs = {}  # Dicionário para armazenar os DataFrames processados por nome de aba
+    POSSIVEIS_ESQUADRIAS  = ['Pagamentos com NF Esquadrias', 'Paagamentos com NF Esquadrias']
+    POSSIVEIS_FERRO_NOBRE = ['Pagamentos com NF Ferro Nobre', 'Paamentos com NF Ferro Nobre']
 
-    # Tenta listar as abas disponíveis para evitar exceções desnecessárias
-    try:
-        xls = pd.ExcelFile(NOME_ARQUIVO_EXCEL_PRINCIPAL)
-        available_sheets = [s.strip() for s in xls.sheet_names]
-    except Exception as e:
-        print(f"ERRO: Não foi possível abrir o arquivo '{NOME_ARQUIVO_EXCEL_PRINCIPAL}' para listar abas. Erro: {e}")
-        return
+    xls = pd.ExcelFile(NOME_ARQUIVO_EXCEL_PRINCIPAL)
+    available_sheets = [s.strip() for s in xls.sheet_names]
 
-    def sheet_exists(name):
-        return any(s.lower() == name.lower() for s in available_sheets)
+    def pick_existing_sheet(possiveis):
+        for candidate in possiveis:
+            for existing in available_sheets:
+                if existing.lower() == candidate.lower():
+                    return existing
+        return None
 
-    # Isso é crucial para que leitura com strings funcione conforme esperado
-    dtypes_leitura = {'Vlr.Recebido': str, 'Documento': str}
+    esperados = list(COLUNAS_ORIGINAIS.keys())
+    dtypes = {'Vlr.Recebido': str, 'Documento': str}
 
-    # --- Processa a aba da Schroeder Esquadrias ---
-    if sheet_exists(NOME_ABA_ESQUADRIAS):
-        try:
-            print(f"Iniciando leitura da aba '{NOME_ABA_ESQUADRIAS}'...")
-            df_esquadrias_raw = pd.read_excel(
-                NOME_ARQUIVO_EXCEL_PRINCIPAL,
-                sheet_name=NOME_ABA_ESQUADRIAS,
-                header=HEADER_ROW_ESQUADRIAS,
-                dtype=dtypes_leitura
-            )
-            df_processed_esquadrias = processar_dados_sheet(
-                df_esquadrias_raw.copy(), COLUNAS_ORIGINAIS, "Esquadrias Processada"
-            )
-            if df_processed_esquadrias is not None:
-                processed_dfs['Esquadrias Processada'] = df_processed_esquadrias
-        except Exception as e:
-            print(f"AVISO: Não foi possível ler ou processar a aba '{NOME_ABA_ESQUADRIAS}'. Erro: {e}")
+    # 1) Tenta Esquadrias
+    sheet_esquad = pick_existing_sheet(POSSIVEIS_ESQUADRIAS)
+    if sheet_esquad:
+        print(f"Iniciando processamento da aba Esquadrias: '{sheet_esquad}'")
+        df_raw = carregar_sheet_com_header_detectado(
+            NOME_ARQUIVO_EXCEL_PRINCIPAL,
+            sheet_esquad,             # <— aqui era sheet_ferro
+            dtypes,
+            esperados,
+            max_scan=10
+        )
+        processed_dfs['Esquadrias Processada'] = processar_dados_sheet(
+            df_raw, COLUNAS_ORIGINAIS, 'Esquadrias Processada'
+        )
+
+    # 2) Se não achou Esquadrias, tenta Ferro Nobre
     else:
-        print(f"AVISO: Aba esperada '{NOME_ABA_ESQUADRIAS}' não encontrada. Pulando.")
-
-    # --- Processa a aba da Schroeder Ferros Nobres ---
-    if sheet_exists(NOME_ABA_FERRO_NOBRE):
-        try:
-            print(f"Iniciando leitura da aba '{NOME_ABA_FERRO_NOBRE}'...")
-            df_ferro_nobre_raw = pd.read_excel(
+        sheet_ferro = pick_existing_sheet(POSSIVEIS_FERRO_NOBRE)
+        if sheet_ferro:
+            print(f"Iniciando processamento da aba Ferro Nobre: '{sheet_ferro}'")
+            df_raw = carregar_sheet_com_header_detectado(
                 NOME_ARQUIVO_EXCEL_PRINCIPAL,
-                sheet_name=NOME_ABA_FERRO_NOBRE,
-                header=HEADER_ROW_FERRO_NOBRE,
-                dtype=dtypes_leitura
+                sheet_ferro,
+                dtypes,
+                esperados,
+                max_scan=10
             )
-            df_processed_ferro_nobre = processar_dados_sheet(
-                df_ferro_nobre_raw.copy(), COLUNAS_ORIGINAIS, "Ferro Nobre Processada"
+            processed_dfs['Ferro Nobre Processada'] = processar_dados_sheet(
+                df_raw, COLUNAS_ORIGINAIS, 'Ferro Nobre Processada'
             )
-            if df_processed_ferro_nobre is not None:
-                processed_dfs['Ferro Nobre Processada'] = df_processed_ferro_nobre
-        except Exception as e:
-            print(f"AVISO: Não foi possível ler ou processar a aba '{NOME_ABA_FERRO_NOBRE}'. Erro: {e}")
-    else:
-        print(f"AVISO: Aba esperada '{NOME_ABA_FERRO_NOBRE}' não encontrada. Pulando.")
+        else:
+            print("Nenhuma aba de Esquadrias nem de Ferro Nobre encontrada. Abortando.")
+            return
 
-    if not processed_dfs:
-        print("Nenhuma aba foi processada com sucesso. Nenhuma saída será gerada.")
-        return
+    # 3) Grava saída e planilhas convertidas
+    with pd.ExcelWriter(ARQUIVO_SAIDA, engine='openpyxl') as writer:
+        for nome_aba, df in processed_dfs.items():
+            df.to_excel(writer, sheet_name=nome_aba, index=False)
 
-    # --- Salva em um único arquivo Excel com abas separadas ---
-    try:
-        print(f"\nSalvando dados processados em: {ARQUIVO_SAIDA}...")
-        with pd.ExcelWriter(ARQUIVO_SAIDA, engine='openpyxl') as writer:
-            for sheet_name_output, df_to_write in processed_dfs.items():
-                df_to_write.to_excel(writer, sheet_name=sheet_name_output, index=False)
-        print(f"Dados salvos com sucesso em '{ARQUIVO_SAIDA}' com abas separadas.")
-    except Exception as e:
-        print(f"Erro ao salvar o arquivo Excel: {e}")
-        return
-
-    # Gera as abas convertidas (usa o arquivo de saída já escrito)
     gerar_planilhas_convertidas(processed_dfs, ARQUIVO_SAIDA)
 
 def processar_planilha_pagamentos_separado_custom(arquivo_entrada, arquivo_saida):
@@ -341,6 +402,13 @@ def processar_planilha_pagamentos_separado_custom(arquivo_entrada, arquivo_saida
     ARQUIVO_SAIDA = arquivo_saida
     processar_planilha_pagamentos_separado()
 
-# Só executa diretamente se for rodado como script
+def main():
+    if len(sys.argv) >= 3:
+        entrada = sys.argv[1]
+        saida = sys.argv[2]
+        processar_planilha_pagamentos_separado_custom(entrada, saida)
+    else:
+        processar_planilha_pagamentos_separado()
+
 if __name__ == "__main__":
-    processar_planilha_pagamentos_separado()
+    main()
