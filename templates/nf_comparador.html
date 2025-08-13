@@ -5,7 +5,31 @@
 {% block header_subtitle %}Verifique quais notas estão no RAR mas não no PDF{% endblock %}
 
 {% block content %}
-  <form method="POST" enctype="multipart/form-data" class="card form-card p-4 mx-auto" style="max-width:600px">
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <div class="alert alert-{{ category }}">{{ message }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <!-- Overlay de carregamento -->
+  <div id="loadingOverlay" style="
+    display:none; position:fixed; inset:0; z-index:9999;
+    background:rgba(0,0,0,.55); backdrop-filter: blur(2px);
+    align-items:center; justify-content:center; gap:.75rem; color:#fff;">
+    <div style="
+      width:40px; height:40px; border-radius:50%;
+      border:4px solid #fff; border-top-color:transparent;
+      animation:spin 1s linear infinite;"></div>
+    <span role="status" aria-live="polite">Processando notas…</span>
+  </div>
+  <style>
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+
+  <form id="nfForm" method="POST" enctype="multipart/form-data" class="card form-card p-4 mx-auto" style="max-width:600px">
     <div class="mb-3">
       <label class="form-label">📁 RAR de Notas:</label>
       <input type="file" name="zip_file" accept=".rar" class="form-control" required>
@@ -15,9 +39,29 @@
       <input type="file" name="relatorio_pdf" accept=".pdf" class="form-control" required>
     </div>
     <div class="text-center">
-      <button type="submit" class="btn btn-primary">🔍 Comparar</button>
+      <button type="submit" id="btnComparar" class="btn btn-primary">🔍 Comparar</button>
     </div>
   </form>
+
+  <script>
+    (function () {
+      const form = document.getElementById('nfForm');
+      const overlay = document.getElementById('loadingOverlay');
+      const btn = document.getElementById('btnComparar');
+
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();                      // evita navegação imediata
+        overlay.style.display = 'flex';          // mostra o loader
+        document.body.style.overflow = 'hidden'; // trava o scroll de fundo
+        if (btn) { btn.disabled = true; btn.innerText = 'Processando…'; }
+
+        // dá um “tick” pro browser renderizar o overlay e só então envia
+        setTimeout(function () {
+          HTMLFormElement.prototype.submit.call(form); // envia sem novo 'submit'
+        }, 50);
+      });
+    })();
+  </script>
 
   {% if resultado %}
     <div class="mt-4">
@@ -110,3 +154,4 @@
       </div>
     </div>
   {% endif %}
+{% endblock %}
