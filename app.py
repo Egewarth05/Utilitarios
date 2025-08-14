@@ -6,12 +6,13 @@ import traceback
 from werkzeug.utils import secure_filename
 from utils.nf_comparador import processar_comparacao_nf
 from utils.combustivel_processador import processar_combustivel
+from utils.extrato_pdf_processador import processar_extrato_pdf
 from utils.ofx_processador import processar_ofx
-from utils.folha_processador import process_sheet # CORREÇÃO AQUI: importe process_sheet
-from utils.nf_comparador import extrair_notas_zip, extrair_relatorio, comparar_nfs
+from utils.folha_processador import process_sheet 
 import json
 import os
 import subprocess
+from utils.nf_comparador import processar_comparacao_nf
 
 app = Flask(__name__)
 SETTINGS_PATH = os.path.join(app.root_path, 'combustivel_settings.json')
@@ -30,10 +31,9 @@ os.makedirs(app.config['DOWNLOAD_FOLDER'], exist_ok=True)
 def index():
     return render_template("index.html")
 
-@app.route('/download_geral/<filename>') # Use um nome diferente para evitar conflitos
+@app.route('/download_geral/<filename>') 
 def download_geral(filename):
-    # Certifique-se de que o DOWNLOAD_FOLDER esteja configurado
-    # e que o arquivo exista dentro dele.
+
     return send_from_directory(
         directory=app.config['DOWNLOAD_FOLDER'],
         path=filename,
@@ -49,6 +49,7 @@ def pagamentos_processador():
     if request.method == 'POST':
         # O template usa name="excel"
         file = request.files.get('excel')
+        empresa = request.form.get('empresa')
         if not file or file.filename == '':
             error = 'Nenhum arquivo selecionado.'
         else:
@@ -72,10 +73,11 @@ def pagamentos_processador():
 
             try:
                 result = subprocess.run(
-                    [sys.executable, script_path, input_filepath, output_filepath],
+                    [sys.executable, script_path, input_filepath, output_filepath, empresa],
                     capture_output=True,
                     text=True
                 )
+
                 print("stdout>", result.stdout)
                 print("stderr>", result.stderr)
                 
@@ -160,58 +162,67 @@ def download_folha_pagamento(filename):
 @app.route('/nf-comparador', methods=['GET','POST'])
 def nf_comparador():
     if request.method == 'POST':
-        rar_file = request.files['zip_file']
-        pdf_file = request.files['relatorio_pdf']
+        # 1. Busca os arquivos do form (names do template)
+        rar_file = request.files.get('zip_file')
+        pdf_file = request.files.get('relatorio_pdf')
 
-        # 1) salva uploads em disco
-        rar_path = os.path.join(app.config['UPLOAD_FOLDER'], rar_file.filename)
-        pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], pdf_file.filename)
+        # 2. Validação imediata
+        if not rar_file or rar_file.filename == '' or not pdf_file or pdf_file.filename == '':
+            flash('Envie o RAR de Notas e o PDF de Relatório.', 'danger')
+            return render_template('nf_comparador.html')
+
+        # 3. Gera nomes seguros e paths
+        filename_rar = secure_filename(rar_file.filename)
+        filename_pdf = secure_filename(pdf_file.filename)
+        rar_path = os.path.join(app.config['UPLOAD_FOLDER'], filename_rar)
+        pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], filename_pdf)
+
+        # 4. Salva no disco
         rar_file.save(rar_path)
         pdf_file.save(pdf_path)
 
-        # valida
-        if not os.path.isfile(rar_path):
-            flash(f"Não encontrei o arquivo de notas “{rar_file.filename}”.", "danger")
-            return redirect(url_for("nf_comparador"))
-        if not os.path.isfile(pdf_path):
-            flash(f"Não encontrei o relatório “{pdf_file.filename}”.", "danger")
-            return redirect(url_for("nf_comparador"))
-
-        # ** NOVO **: cria um diretório de saída próprio
+        # 5. Cria pasta de resultados
         result_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'resultados_nf')
         os.makedirs(result_dir, exist_ok=True)
 
+        # 6. Chama o processador
         try:
             resultado, pdf_path_saida = processar_comparacao_nf(
                 rar_path,
                 pdf_path,
                 result_dir
             )
+            
+            session['pdf_filename'] = os.path.basename(pdf_path_saida)
+            session['result_dir']   = 'resultados_nf'
+            
         except FileNotFoundError as e:
-            flash(str(e), "danger")
-            return redirect(url_for("nf_comparador"))
+            flash(str(e), 'danger')
+            return redirect(url_for('nf_comparador'))
         except Exception as e:
-            flash(f"Erro inesperado: {e}", "danger")
-            return redirect(url_for("nf_comparador"))
+            flash(f'Erro inesperado: {e}', 'danger')
+            return render_template('nf_comparador.html')
 
-        session['resultado']    = resultado
-        # salva só o nome do PDF de saída, não do upload original
-        session['pdf_filename'] = os.path.basename(pdf_path_saida)
-        session['result_dir']   = 'resultados_nf'
-        return redirect(url_for('nf_comparador'))
-
-    return render_template(
-        'nf_comparador.html',
-        resultado    = session.get('resultado'),
-        pdf_filename = session.get('pdf_filename'),
-        result_dir   = session.get('result_dir'),
-    )
+        # 7. Renderiza direto com o resultado
+        return render_template(
+            'nf_comparador.html',
+            resultado    = resultado,
+            pdf_filename = os.path.basename(pdf_path_saida),
+            result_dir   = 'resultados_nf'
+        )
+    return render_template('nf_comparador.html')
 
 @app.route('/relatorio-nf-pdf')
 def relatorio_nf_pdf():
     filename   = session.get('pdf_filename')
     result_dir = session.get('result_dir', '')
-    caminho    = os.path.join(app.config['UPLOAD_FOLDER'], result_dir, filename)
+    if not filename:
+        flash('Nenhum relatório encontrado para download. Refaça a comparação.', 'danger')
+        return redirect(url_for('nf_comparador'))
+    caminho = os.path.join(app.config['UPLOAD_FOLDER'], result_dir, filename)
+    if not os.path.exists(caminho):
+        flash('Arquivo de relatório não está mais disponível. Refaça a comparação.', 'danger')
+        return redirect(url_for('nf_comparador'))
     return send_file(
         caminho,
         as_attachment=True,
@@ -219,8 +230,8 @@ def relatorio_nf_pdf():
     )
 
 def processar_comparacao_nf_from_lists(notas_zip, relatorio_formatado, output_dir):
-    resultado = comparar_nfs(notas_zip, relatorio_formatado, output_dir)
-    pdf_path  = resultado.pop("pdf")
+    # usa a função real que você importou acima
+    resultado, pdf_path = processar_comparacao_nf(notas_zip, relatorio_formatado, output_dir)
     return resultado, pdf_path
 
 @app.route('/download/<filename>')
@@ -342,6 +353,49 @@ def download_combustivel(filename):
         as_attachment=True
     )
 
+@app.route('/extrato-pdf', methods=['GET','POST'], endpoint='extrato_pdf')
+def extrato_pdf():
+    resultado = None
+    xlsx_name = txt_name = None
+    gerar_txt = False
+
+    if request.method == 'POST':
+        pdf_file = request.files.get('pdf_file')
+        gerar_txt = (request.form.get('gerar_txt') == 'sim')
+
+        # Prefixo fixo "1". Os demais códigos seguem o padrão do processador
+        # (meio="5" e cc="337") até você passar via planilha.
+        cfg = {'codigo_prefixo': '1'}
+
+        if not pdf_file or pdf_file.filename == '':
+            flash('Envie o PDF do extrato.', 'danger')
+            return render_template('extrato_pdf.html', gerar_txt=gerar_txt)
+
+        in_dir = app.config.get('UPLOAD_FOLDER', 'uploads')
+        out_dir = app.config.get('DOWNLOAD_FOLDER', in_dir)
+        os.makedirs(in_dir, exist_ok=True)
+        os.makedirs(out_dir, exist_ok=True)
+
+        in_path = os.path.join(in_dir, 'extrato.pdf')
+        xlsx_name = 'extrato_processado.xlsx'
+        xlsx_path = os.path.join(out_dir, xlsx_name)
+        txt_name = 'extrato_processado.txt' if gerar_txt else None
+        txt_path = os.path.join(out_dir, txt_name) if gerar_txt else None
+
+        pdf_file.save(in_path)
+
+        try:
+            ret = processar_extrato_pdf(in_path, xlsx_path, txt_path, cfg)
+            resultado = {'qtd': ret.get('quantidade_lancamentos', 0)}
+            flash('Extrato processado com sucesso!', 'success')
+        except Exception as e:
+            flash(f'Erro ao processar extrato: {e}', 'danger')
+
+    return render_template('extrato_pdf.html',
+                           resultado=resultado,
+                           xlsx_name=xlsx_name,
+                           txt_name=txt_name,
+                           gerar_txt=gerar_txt)
 
 if __name__ == '__main__':
     app.run(debug=True)
