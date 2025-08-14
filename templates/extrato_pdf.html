@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Extrato PDF → XLSX/TXT</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet"/>
+  <style>
+  body{background:#0d1117;color:#fff;}
+  .card{background:#161b22;border:none;}
+  label.form-label{color:#fff;}
+  .form-control,.form-select{background:#0d1117;border-color:#30363d;color:#fff;}
+  .form-control::placeholder{color:#fff;opacity:.85;}
+  /* Deixa o texto do input de arquivo visível e estiliza o botão */
+  input[type="file"]{color:#fff;}
+  input[type="file"]::file-selector-button{
+    background:#238636;color:#fff;border:1px solid #238636;
+    border-radius:.375rem;padding:.375rem .75rem;margin-right:.75rem;
+  }
+  /* Safari/WebKit */
+  input[type="file"]::-webkit-file-upload-button{
+    background:#238636;color:#fff;border:1px solid #238636;
+    border-radius:.375rem;padding:.375rem .75rem;margin-right:.75rem;
+  }
+  .btn-primary{background:#238636;border-color:#238636;}
+  .btn-outline-light{border-color:#58a6ff;color:#58a6ff;}
+  .btn-outline-light:hover{background:#58a6ff;color:#0d1117;}
+</style>
+
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark" style="background:rgba(0,0,0,.7)">
+  <div class="container">
+    <a class="navbar-brand" href="{{ url_for('index') }}">
+      <i class="fa-solid fa-toolbox me-2"></i>Utilitários
+    </a>
+  </div>
+</nav>
+
+<main class="container py-4">
+  <h1 class="h3 mb-3">Extrato bancário (PDF) → XLSX/TXT</h1>
+  <p class="text-secondary">Envie um extrato em PDF (XP) e gere um XLSX com <em>Descrição, Conta, Histórico, Contrapartida</em> e, opcionalmente, um TXT contábil.</p>
+
+  <div class="card p-3">
+    <form method="post" enctype="multipart/form-data" class="row g-3">
+        <div class="col-12">
+            <label class="form-label">Arquivo PDF do extrato</label>
+            <input class="form-control" type="file" name="pdf_file" accept=".pdf" required />
+        </div>
+
+        <div class="col-md-3">
+            <label class="form-label">Gerar TXT contábil?</label>
+            <select class="form-select" name="gerar_txt">
+            <option value="nao" {% if not gerar_txt %}selected{% endif %}>Não</option>
+            <option value="sim" {% if gerar_txt %}selected{% endif %}>Sim</option>
+            </select>
+        </div>
+
+        <div class="col-12 d-flex gap-2">
+            <button class="btn btn-primary"><i class="fa fa-file-import me-2"></i>Processar</button>
+            <a class="btn btn-outline-light" href="{{ url_for('index') }}"><i class="fa fa-arrow-left me-2"></i>Voltar</a>
+        </div>
+    </form>
+  </div>
+
+  {% if resultado %}
+    <div class="alert alert-success mt-3">Processado com sucesso ({{ resultado.qtd }} lançamentos).</div>
+    <div class="d-flex flex-wrap gap-2">
+      {% if xlsx_name %}
+      <a class="btn btn-success" href="{{ url_for('download_geral', filename=xlsx_name) }}">
+        <i class="fa fa-file-excel me-2"></i>Baixar XLSX
+      </a>
+      {% endif %}
+      {% if txt_name %}
+      <a class="btn btn-secondary" href="{{ url_for('download_geral', filename=txt_name) }}">
+        <i class="fa fa-file-lines me-2"></i>Baixar TXT
+      </a>
+      {% endif %}
+    </div>
+  {% endif %}
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
