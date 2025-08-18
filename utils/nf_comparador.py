@@ -94,15 +94,20 @@ def extrair_info_pdf(pdf_path):
     header_section = re.sub(r'(\d)\s*,\s*(\d{2})', r'\1,\2', header_section)
     header_section = _compact_money_digits(header_section)
 
-    linhas = [x.strip() for x in header_section.splitlines()]
-    flat = " ".join(linhas)
-
     # ===== DATA =====
     RX_DATA_ANY = re.compile(r"(\d{2}[\/\.-]\d{2}[\/\.-](?:\d{2}|\d{4}))", re.I)
     RX_EMISSAO_NEAR = re.compile(
         r"(?:data(?:\s+\w+){0,5}\s*(?:da\s*nota\s*|de\s*)?emiss[aã]o)\D{0,120}" + RX_DATA_ANY.pattern,
         re.I
     )
+    
+    RX_CNPJ = re.compile(r'\b\d{2}[.\s]?\d{3}[.\s]?\d{3}\s*/\s*\d{4}\s*-\s*\d{2}\b')
+    RX_CPF  = re.compile(r'\b\d{3}[.\s]?\d{3}[.\s]?\d{3}\s*-\s*\d{2}\b')
+    header_section = RX_CNPJ.sub(' [CNPJ] ', header_section)
+    header_section = RX_CPF.sub(' [CPF] ', header_section)
+    linhas = [x.strip() for x in header_section.splitlines()]
+    flat   = " ".join(linhas)
+    
     def _canon_date(s: str) -> str:
         d, m, y = re.split(r"[\/\.-]", s)
         if len(y) == 2:
@@ -204,7 +209,8 @@ def extrair_info_pdf(pdf_path):
         r"tribut|imposto|parcela|parcelas|venc(?:imento)?|juros|multa|"
         r"pagamento|boleto|duplicata|carn[eé]|"
         r"periodo|per[íi]odo|compet[eê]ncia|compet|"
-        r"quantidade|qtd|descri[cç][aã]o|cod\.?\s*serv|abatiment|percent|%|cep)\b",
+        r"quantidade|qtd|descri[cç][aã]o|cod\.?\s*serv|abatiment|percent|%|cep|"
+        r"cnpj|cpf|inscri[cç][aã]o|rps|c[oó]d|verifica[cç][aã]o|autenticidade)\b",
         re.IGNORECASE
     )
 
@@ -426,6 +432,8 @@ def extrair_info_pdf(pdf_path):
         re.compile(rf"(?:valor|vlr\.?)\s+bruto\s+da\s+(?:nota(?:\s+fiscal)?(?:\s+de\s+servi[cç]os)?)"
                    rf"{SPAN_NEAR}(?:R\$\s*)?({MONEY})", re.I|re.S),
         re.compile(rf"valor\s+l[ií]quido(?:\s+da\s+nota\s+fiscal)?{SPAN_NEAR}(?:R\$\s*)?({MONEY})", re.I|re.S),
+        re.compile(rf"(?:fatura|duplicata){SPAN_NEAR}valor{SPAN_NEAR}(?:R\$\s*)?({MONEY})",
+               re.I | re.S),
     ]
 
     best_val = None
@@ -434,13 +442,16 @@ def extrair_info_pdf(pdf_path):
         for m in rx.finditer(flat):
             dec = _money_to_decimal(m.group(1))
             ctx = flat[max(0, m.start(1)-80): m.end(1)+80].lower()
-            if dec is None or dec <= 0 or BAD_CTX.search(ctx):
+            label_txt = flat[max(0, m.start()-80): m.start(1)].lower()
+            is_fatura = ('fatura' in label_txt) or ('duplicata' in label_txt)
+            if dec is None or dec <= 0:
                 continue
-            # distância: número após o início do rótulo
+            # só aplica BAD_CTX se não for o caso FATURA/DUPLICATA
+            if (not is_fatura) and BAD_CTX.search(ctx):
+                continue
             dist = m.start(1) - m.start()
             if dist < best_dist or (dist == best_dist and (best_val is None or dec > best_val)):
-                best_dist = dist
-                best_val = dec
+                best_dist, best_val = dist, dec
 
     if best_val is not None:
         valor = str(best_val)
@@ -475,7 +486,10 @@ def extrair_info_pdf(pdf_path):
     GOOD_NEAR = re.compile(r'(valor|total|nfs|nota|servi[cç]o|l[ií]quido|bruto)', re.IGNORECASE)
     def _ok_context(pos: int) -> bool:
         janela = flat[max(0, pos-150):pos+150].lower()
-        return GOOD_NEAR.search(janela) and not BAD_CTX.search(janela)
+        perto  = flat[max(0, pos-10):pos+10]
+        return (GOOD_NEAR.search(janela)
+                and '/' not in perto
+                and not BAD_CTX.search(janela))
 
     candidatos = []
     for m in rx_val_rs.finditer(flat):
@@ -584,6 +598,13 @@ def gerar_pdf_relatorio(encontradas, divergentes, nao_encontradas, sem_dados, ou
     c = canvas.Canvas(output_path, pagesize=A4)
     width, height = A4
     y = height - 50
+
+    def fmt_val(v):
+        return f"R$ {v}" if v not in (None, "", "—") else "—"
+
+    def fmt_date(d):
+        return d if d not in (None, "", "—") else "—"
+
     def add_secao(titulo, itens):
         nonlocal y
         c.setFont("Helvetica-Bold", 12)
@@ -598,14 +619,26 @@ def gerar_pdf_relatorio(encontradas, divergentes, nao_encontradas, sem_dados, ou
             if y < 50:
                 c.showPage()
                 y = height - 50
-            linha = f"Nº: {it['numero']} | Data: {it['data']} | Valor: R$ {it['valor']}"
-            if it.get("arquivo"): linha += f" | Arquivo: {it['arquivo']}"
-            if it.get("esperado"): 
-                exp = it['esperado']
-                linha += f" | Esperado: Nº {exp['numero']}, {exp['data']}, R$ {exp['valor']}"
+
+            linha = (
+                f"Nº: {it['numero']} | "
+                f"Data: {fmt_date(it.get('data'))} | "
+                f"Valor: {fmt_val(it.get('valor'))}"
+            )
+            if it.get("arquivo"):
+                linha += f" | Arquivo: {it['arquivo']}"
+
+            if it.get("esperado"):
+                exp = it["esperado"]
+                linha += (
+                    f" | Esperado: Nº {exp.get('numero')}, "
+                    f"{fmt_date(exp.get('data'))}, {fmt_val(exp.get('valor'))}"
+                )
+
             c.drawString(50, y, linha)
             y -= 15
         y -= 20
+
     c.setFont("Helvetica-Bold", 14)
     c.drawString(40, y, "Relatório de Validação de NFS-e")
     y -= 30
@@ -629,7 +662,6 @@ def to_decimal_br(s):
         return None
     try:
         s = str(s).strip()
-        # aceita "1.234,56" e "1234.56"
         s = s.replace('.', '').replace(',', '.')
         return Decimal(s).quantize(Decimal('0.01'))
     except (InvalidOperation, AttributeError, ValueError):
@@ -637,13 +669,7 @@ def to_decimal_br(s):
 
 # === 5) Função principal ===
 def processar_comparacao_nf(zip_path, relatorio_pdf_path, output_dir):
-    """
-    Compara as NFS-e do RAR com o relatório PDF.
-    - NÃO herda valor/data do relatório para a NF extraída (OCR).
-    - Marca como 'encontrada' SOMENTE se (número, data e valor) do OCR coincidirem com o relatório.
-    - Se não houver match exato, vai para 'divergentes' com 'esperado' (do relatório) só para exibição.
-    - NF-e são ignoradas antes (filtradas em extrair_notas_zip / extrair_info_pdf).
-    """
+
     temp = os.path.join(os.path.dirname(output_dir), "temp_notas")
     if os.path.isdir(temp):
         shutil.rmtree(temp, onerror=lambda f, p, e: os.chmod(p, stat.S_IWRITE) or f(p))
