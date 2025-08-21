@@ -4,7 +4,7 @@ import re
 import stat
 import shutil
 import tempfile
-import rarfile
+import zipfile
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 import fitz  # PyMuPDF
@@ -14,6 +14,11 @@ from PIL import Image
 from datetime import date
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+import sys
+
+if sys.platform.startswith("win"):
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
 
 DEBUG_NF = True
 
@@ -38,11 +43,6 @@ def _money_to_decimal(txt: str):
         return Decimal(clean.replace(",", ".")).quantize(Decimal("0.01"))
     except InvalidOperation:
         return None
-
-# configurações externas
-rarfile.UNRAR_TOOL = r"C:\Program Files\UnRAR.exe"
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-os.environ["TESSDATA_PREFIX"] = r"C:\Program Files\Tesseract-OCR\tessdata"
 
 UNICODE_SPACES = "\u00A0\u202F\u2007\u2009\u200A\u2008\u2006\u205F"
 SPACES = rf"[.\s{UNICODE_SPACES}]"
@@ -518,14 +518,20 @@ def extrair_info_pdf(pdf_path):
 # === 2) Extrai notas (info) do RAR ===
 def extrair_notas_zip(zip_path, temp_dir):
     """
-    Extrai e processa todos os arquivos PDF dentro do RAR, inclusive em subpastas.
-    Retorna lista de dicionários com infos extraídas e lista de arquivos sem dados (sem número).
+    Extrai PDFs de um arquivo ZIP (não RAR) para temp_dir e processa.
+    Retorna (notas, sem_dados).
     """
     os.makedirs(temp_dir, exist_ok=True)
-    with rarfile.RarFile(zip_path) as rar:
-        rar.extractall(temp_dir)
 
-    # varre recursivamente todos os PDFs extraídos
+    # valida extensão e extrai
+    ext = os.path.splitext(zip_path)[1].lower()
+    if ext != ".zip":
+        raise RuntimeError("Este servidor só aceita arquivo ZIP (RAR não suportado).")
+
+    with zipfile.ZipFile(zip_path) as z:
+        z.extractall(temp_dir)
+
+    # varre recursivamente os PDFs extraídos (mesmo código que você já tinha)
     pdfs = []
     for root, dirs, files in os.walk(temp_dir):
         for fn in files:
@@ -533,8 +539,8 @@ def extrair_notas_zip(zip_path, temp_dir):
                 continue
             if 'fatura' in fn.lower():
                 continue
-            # Ignorar NFe pelo NOME: tem "nfe" e NÃO tem "nfs"/"nfs-e"
             fn_lower = fn.lower()
+            # Ignorar NFe pelo NOME: tem "nfe" e NÃO tem "nfs"/"nfs-e"
             if re.search(r'\bnf[\s\-_.]*e\b', fn_lower) and not re.search(r'\bnfs[\s\-_.]*e?\b', fn_lower):
                 continue
             pdfs.append(os.path.join(root, fn))
@@ -678,8 +684,16 @@ def processar_comparacao_nf(zip_path, relatorio_pdf_path, output_dir):
     os.makedirs(temp, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Extrai NFS-e do RAR (NF-e já são ignoradas) e lê o relatório
-    notas, sem_dados = extrair_notas_zip(zip_path, temp)
+    # Extrai NFS-e do ZIP (NF-e já são ignoradas) e lê o relatório
+    try:
+        notas, sem_dados = extrair_notas_zip(zip_path, temp)
+    except Exception as e:
+        # Mensagem clara para a UI/log
+        raise RuntimeError(
+            f"Falha ao extrair o arquivo compactado: {e}. "
+            "Envie um arquivo ZIP (RAR não é suportado)."
+        )
+
     rel = extrair_relatorio(relatorio_pdf_path)
 
     encontradas, divergentes, nao_encontradas = [], [], []
@@ -703,7 +717,6 @@ def processar_comparacao_nf(zip_path, relatorio_pdf_path, output_dir):
             nao_encontradas.append(nf)
             continue
 
-        # Dados vindos EXCLUSIVAMENTE do OCR/texto da nota
         val_nf  = to_decimal_br(nf.get('valor'))
         data_nf = nf.get('data')
 
@@ -720,10 +733,10 @@ def processar_comparacao_nf(zip_path, relatorio_pdf_path, output_dir):
         if exact:
             encontradas.append(nf)
         else:
-            nf['esperado'] = matches[0]  
+            nf['esperado'] = matches[0]
             divergentes.append(nf)
 
-    MISSING = "—"  
+    MISSING = "—"
 
     def _sanitize(items):
         for it in items:
@@ -749,3 +762,4 @@ def processar_comparacao_nf(zip_path, relatorio_pdf_path, output_dir):
         "pdf": pdf_out
     }
     return resultado, pdf_out
+
