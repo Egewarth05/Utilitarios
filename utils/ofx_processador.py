@@ -1,11 +1,6 @@
 import os
 import re
 import sys
-import tkinter as tk
-import ttkbootstrap as tb
-from ttkbootstrap.constants import *
-from tkinter import filedialog, messagebox
-
 
 def sgml_para_xml(raw: str) -> str:
     raw = raw[raw.find('<OFX>') : ]
