@@ -1,9 +1,29 @@
-
+import io
 import re
+import fitz  # PyMuPDF
 import pdfplumber
 import unicodedata
+from PIL import Image
+import pytesseract
 from decimal import Decimal, InvalidOperation
 from typing import List, Dict, Optional, Tuple
+
+# palavras-gatilho que marcam início de descrição no meio da linha
+KNOWN_STARTS = [
+    "TAXA DE INTERMEDIACAO",
+    "CREDITO REF",
+    "DEBITO CBLC IRRF",
+    "OPERACOES EM BOLSA LIQ",
+    "DIVIDENDOS DE CLIENTES",
+    "CREDITO DE REEMBOLSO",
+]
+
+# detecta um SEGUNDO par de datas na mesma linha (quebra em novo lançamento)
+DATEPAIR_RE = re.compile(r'\d{2}/\d{2}/\d{4}\s+\d{2}/\d{2}/\d{4}')
+
+# fallback para quando as 2 datas vêm quebradas em LINHAS diferentes
+ONE_DATE_ONLY_RE = re.compile(r'^\s*(\d{2}/\d{2}/\d{4})\s*$')
+NEXT_DATE_AND_TEXT_RE = re.compile(r'^\s*(\d{2}/\d{2}/\d{4})(?:\s+(.*))?$')
 
 DECIMAL_RE = re.compile(r'([-\u2212]?)R\$\s*([\d\.\,\u00A0]+)')  # aceita NBSP e sinal U+2212
 HEADER_RE = re.compile(r'^\s*Liq\s+Mov\s+Histórico\s+Valor\s+Saldo', re.IGNORECASE)
@@ -12,10 +32,26 @@ FUTUROS_RE = re.compile(r'^\s*Lançamentos futuros', re.IGNORECASE)
 DOC_NO_RE = re.compile(r'^(?:N[ºo]\s*)?(\d{6,})$', re.IGNORECASE)
 DOC_NO_PURE_RE = re.compile(r'^(?:N[ºo]\s*)(\d{6,})$', re.IGNORECASE)
 DOC_NO_WITH_TEXT_RE = re.compile(r'^(?:N[ºo]\s*)(\d{6,})\s+(.+)$', re.IGNORECASE)
-# linha que começa um lançamento: duas datas; o texto depois é OPCIONAL
 DATE_LINE_RE = re.compile(
-    r'^(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})(?:\s+(.*))?$'
+    r'^\s*(\d{2}/\d{2}/\d{4})\s+(\d{2}/\d{2}/\d{4})(?:\s+(.*))?$'
 )
+
+# ---------------------------
+# OCR helpers (usado só quando a página não tem texto)
+# ---------------------------
+def _ocr_page_to_lines(fitz_page: fitz.Page, dpi: int = 300, lang: Optional[str] = None) -> List[str]:
+    """Renderiza a página como imagem e roda OCR, retornando as linhas de texto."""
+    zoom = dpi / 72.0
+    mat = fitz.Matrix(zoom, zoom)
+    pix = fitz_page.get_pixmap(matrix=mat, alpha=False)
+    img = Image.open(io.BytesIO(pix.tobytes("png")))
+    txt = pytesseract.image_to_string(img, lang=lang) if lang else pytesseract.image_to_string(img)
+    # normaliza quebras de linha
+    lines = [ln.rstrip() for ln in txt.splitlines()]
+    # remove linhas vazias excessivas
+    return [l for l in lines if l.strip()]
+
+# ---------------------------
 
 def _parse_doc_line(line: str) -> tuple[Optional[str], Optional[str]]:
     """
@@ -32,6 +68,7 @@ def _parse_doc_line(line: str) -> tuple[Optional[str], Optional[str]]:
     if m1:
         return m1.group(1), None
     return None, None
+
 def _is_doc_no_line(line: str) -> Optional[str]:
     m = DOC_NO_RE.match(line.strip())
     return m.group(1) if m else None
@@ -62,7 +99,6 @@ def _is_header_line(s: str) -> bool:
     z = _norm(s)
     return all(k in z for k in ["LIQ","MOV","HISTORICO","VALOR","SALDO"])
 
-
 def _classificar_conta_historico(descricao: str):
     d = _norm(descricao)
     if "TAXA DE INTERMEDIACAO" in d:
@@ -80,23 +116,16 @@ def _classificar_conta_historico(descricao: str):
     return None, None, None
 
 def _page_to_lines(page) -> list[str]:
-    """
-    Constrói linhas estáveis a partir das palavras do PDF,
-    agrupando por coordenada vertical (top) com tolerância.
-    Evita que duas linhas visuais virem uma só.
-    """
     words = page.extract_words(
-        x_tolerance=2,     # não juntar palavras de colunas diferentes
-        y_tolerance=2,     # sensibilidade a quebras de linha
+        x_tolerance=2,
+        y_tolerance=4,          # << antes era 2
         keep_blank_chars=False,
         use_text_flow=True
     )
-    lines = []
-    row = []
-    last_top = None
+    lines, row, last_top = [], [], None
     for w in words:
         t = round(w["top"], 1)
-        if last_top is None or abs(t - last_top) <= 2:
+        if last_top is None or abs(t - last_top) <= 3.5:   # << antes era <= 2
             row.append((w["x0"], w["text"]))
         else:
             row.sort(key=lambda z: z[0])
@@ -108,24 +137,13 @@ def _page_to_lines(page) -> list[str]:
         lines.append(" ".join(z[1] for z in row))
     return lines
 
-KNOWN_STARTS = [
-    "TAXA DE INTERMEDIACAO",
-    "CREDITO REF",               
-    "DEBITO CBLC IRRF",          
-    "OPERACOES EM BOLSA LIQ",    
-    "DIVIDENDOS DE CLIENTES",
-    "CREDITO DE REEMBOLSO",      
-]
-
-# um segundo par de datas no meio da linha também inicia novo lançamento
-DATEPAIR_RE = re.compile(r'\d{2}/\d{2}/\d{4}\s+\d{2}/\d{2}/\d{4}')
-
 def _normalize_with_map(s: str) -> tuple[str, list[int]]:
     """Normaliza (sem acentos, maiúsc.) e devolve o mapa de posições norm->orig."""
     norm_chars = []
     pos_map = []
     for i, ch in enumerate(s):
         base = unicodedata.normalize('NFKD', ch)
+        base = ''.join(c for c in base if not c.isascii() and unicodedata.combining(c)) or base
         base = ''.join(c for c in base if not unicodedata.combining(c))
         if not base:
             continue
@@ -175,38 +193,90 @@ def _split_on_known_starts(line: str) -> list[str]:
     return parts
 
 def _explode_lines(lines: list[str]) -> list[str]:
-    """Aplica o corte acima a todas as linhas da página."""
     out = []
     for l in lines:
         out.extend(_split_on_known_starts(l))
     return out
 
-def parse_xp_extrato_pdf(pdf_path: str) -> List[Dict]:
+def parse_xp_extrato_pdf(pdf_path: str, *, ocr_dpi: int = 300, ocr_lang: Optional[str] = "por") -> Tuple[List[Dict], Dict]:
+    """
+    Lê o PDF de extrato.
+    - Usa pdfplumber normalmente (sem alterar seu comportamento atual).
+    - Se a página não tiver texto (imagem/digitalizada), usa OCR (pytesseract) naquela página.
+    Retorna (rows, meta) onde meta indica se houve OCR e em quais páginas.
+    """
     rows: List[Dict] = []
     in_table = False
     current = None
 
-    pending_desc = ""              
-    candidate_desc = ""            
+    pending_desc = ""
+    candidate_desc = ""
+    first_date_only: Optional[str] = None
+
+    fitz_doc = fitz.open(pdf_path)
+    paginas_ocr: List[int] = []
+
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
+        for idx, page in enumerate(pdf.pages):
+            # garante flush do lançamento anterior ao mudar de página
+            if current:
+                if not current.get('descricao') and candidate_desc:
+                    current['descricao'] = candidate_desc
+                rows.append(current)
+                current = None
+
+            # --- zera o contexto por página ---
+            in_table = False
+            pending_desc = ""
+            candidate_desc = ""
+            first_date_only = None
+
+            # 1) tentativa padrão (mantém o que você já fazia)
             raw_lines = _page_to_lines(page)
-            if not raw_lines:  # fallback extra
+
+            # 2) fallback: extract_text()
+            if not raw_lines:
                 text = page.extract_text() or ""
-                raw_lines = [l.rstrip() for l in text.splitlines()]
+                raw_lines = [l.rstrip() for l in text.splitlines() if l.strip()]
+
+            # 3) fallback final: OCR somente se ainda não houver nada
+            if not raw_lines:
+                fpage = fitz_doc.load_page(idx)
+                raw_lines = _ocr_page_to_lines(fpage, dpi=ocr_dpi, lang=ocr_lang)
+                paginas_ocr.append(idx + 1)  # páginas 1-based
+
             lines = _explode_lines(raw_lines)
+
             for raw_line in lines:
                 line = raw_line.strip()
                 if not line:
                     continue
 
-                m_dates = DATE_LINE_RE.match(line)
+                if first_date_only is None:
+                    m_one = ONE_DATE_ONLY_RE.match(line)
+                    if m_one:
+                        first_date_only = m_one.group(1)
+                        continue
+                else:
+                    m_next = NEXT_DATE_AND_TEXT_RE.match(line)
+                    if m_next:
+                        segunda = m_next.group(1)
+                        resto = m_next.group(2) or ""
+                        line = f"{first_date_only} {segunda} {resto}".strip()
+                        first_date_only = None
+                    else:
+                        # a primeira "data solta" não formou par — trate como texto pendente
+                        pending_desc = _clean_spaces(((pending_desc + " " + first_date_only).strip()) if pending_desc else first_date_only)
+                        first_date_only = None
 
+                m_dates = DATE_LINE_RE.match(line)  # <- sempre calcule aqui
+
+                # 0) Entrar na tabela
                 if not in_table:
                     # entra na tabela se ver o header OU já ver a primeira linha com datas
                     if HEADER_RE.search(line) or _is_header_line(line) or m_dates:
                         in_table = True
-                        # se não for uma linha de datas, passa pra próxima
+                        # se NÃO for uma linha de datas (ex.: cabeçalho), vai pra próxima
                         if not m_dates:
                             continue
                     else:
@@ -214,48 +284,72 @@ def parse_xp_extrato_pdf(pdf_path: str) -> List[Dict]:
 
                 # 1) Fim da tabela
                 if FUTUROS_RE.search(line):
-                        if m_dates:
-                            # fecha o anterior (sem checar valor/saldo)
-                            if current:
-                                if not current.get('descricao') and candidate_desc:
-                                    current['descricao'] = candidate_desc
-                                rows.append(current)
+                    # garante que "data solta" não se perca ao fechar a seção
+                    if first_date_only:
+                        pending_desc = _clean_spaces(
+                            ((pending_desc + " " + first_date_only).strip()) if pending_desc else first_date_only
+                        )
+                        first_date_only = None
 
-                            # abre novo lançamento
-                            desc_inline = _strip_trailing_amounts(_clean_spaces(m_dates.group(3) or ""))
-                            current = {
-                                'data_liq': m_dates.group(1),
-                                'data_mov': m_dates.group(2),
-                                'descricao': desc_inline if desc_inline else None,
-                                'documento': None,
-                                'valor': None,        # só valor
-                                'tipo': None,
-                                'conta': None,
-                                'historico_code': None,
-                                'contrapartida': None,
-                            }
+                    if current:
+                        if not current.get('descricao') and candidate_desc:
+                            current['descricao'] = candidate_desc
+                        rows.append(current)
+                    in_table = False
+                    current = None
+                    pending_desc = ""
+                    candidate_desc = ""
+                    continue
 
-                            # valor pode (ou não) estar na mesma linha
-                            m_val_here = DECIMAL_RE.search(line)
-                            if m_val_here:
-                                sign_v, v = m_val_here.groups()
-                                valor = _to_decimal_br(v)
-                                if sign_v in ('-', '\u2212'):
-                                    valor = -valor
-                                current['valor'] = valor
-                                current['tipo'] = 'D' if valor < 0 else 'C'
+                # 2) Linha com datas (abre/fecha lançamento)
+                if m_dates:
+                    if first_date_only:
+                        pending_desc = _clean_spaces(
+                            ((pending_desc + " " + first_date_only).strip()) if pending_desc else first_date_only
+                        )
+                        first_date_only = None
 
-                            candidate_desc = current['descricao'] or ""
-                            if not candidate_desc and pending_desc:
-                                candidate_desc = pending_desc
-                                current['descricao'] = pending_desc
+                    if current:
+                        if not current.get('descricao') and candidate_desc:
+                            current['descricao'] = candidate_desc
+                        rows.append(current)
 
-                            if current.get('descricao'):
-                                conta, hist, cp = _classificar_conta_historico(current['descricao'])
-                                current['conta'], current['historico_code'], current['contrapartida'] = conta, hist, cp
+                    # abre novo lançamento
+                    desc_inline = _strip_trailing_amounts(_clean_spaces(m_dates.group(3) or ""))
+                    current = {
+                        'data_liq': m_dates.group(1),
+                        'data_mov': m_dates.group(2),
+                        'descricao': desc_inline if desc_inline else None,
+                        'documento': None,
+                        'valor': None,   # só valor (sem saldo)
+                        'tipo': None,
+                        'conta': None,
+                        'historico_code': None,
+                        'contrapartida': None,
+                    }
 
-                            pending_desc = ""
-                            continue
+                    # valor pode (ou não) estar na mesma linha
+                    m_val_here = DECIMAL_RE.search(line)
+                    if m_val_here:
+                        sign_v, v = m_val_here.groups()
+                        valor = _to_decimal_br(v)
+                        if sign_v in ('-', '\u2212'):
+                            valor = -valor
+                        current['valor'] = valor
+                        current['tipo'] = 'D' if valor < 0 else 'C'
+
+                    # descrição/categorização
+                    candidate_desc = current['descricao'] or ""
+                    if not candidate_desc and pending_desc:
+                        candidate_desc = pending_desc
+                        current['descricao'] = pending_desc
+
+                    if current.get('descricao'):
+                        conta, hist, cp = _classificar_conta_historico(current['descricao'])
+                        current['conta'], current['historico_code'], current['contrapartida'] = conta, hist, cp
+
+                    pending_desc = ""
+                    continue
 
                 # 3) Ainda não começou nenhum lançamento: acumula descrição pré-datas
                 if current is None:
@@ -264,10 +358,8 @@ def parse_xp_extrato_pdf(pdf_path: str) -> List[Dict]:
                         if after:
                             pending_desc = _clean_spaces((pending_desc + " " + after).strip()) if pending_desc else after
                         continue
-                    # ignora valores/doc longo antes da data
                     if DECIMAL_RE.search(line) or _is_big_doc_code(line):
                         continue
-                    # resto é texto: acumula
                     pending_desc = _clean_spaces((pending_desc + " " + line).strip()) if pending_desc else line
                     continue
 
@@ -287,7 +379,6 @@ def parse_xp_extrato_pdf(pdf_path: str) -> List[Dict]:
                     current['documento'] = line.strip()
                     continue
 
-                # 4.3) Linha com valor (se ainda não setado)
                 m_val = DECIMAL_RE.search(line)
                 if m_val and current.get('valor') is None:
                     sign_v, v = m_val.groups()
@@ -296,26 +387,41 @@ def parse_xp_extrato_pdf(pdf_path: str) -> List[Dict]:
                         valor = -valor
                     current['valor'] = valor
                     current['tipo'] = 'D' if valor < 0 else 'C'
+
+                    # tentar extrair a descrição desta linha de valor
+                    if not current.get('descricao'):
+                        maybe_desc = _clean_spaces(_strip_trailing_amounts(line))
+                        # ignora se sobrou apenas datas (ou nada)
+                        if maybe_desc and not re.fullmatch(r'\d{2}/\d{2}/\d{4}(?:\s+\d{2}/\d{2}/\d{4})?', maybe_desc):
+                            current['descricao'] = maybe_desc
+                            candidate_desc = maybe_desc
+                            conta, hist, cp = _classificar_conta_historico(maybe_desc)
+                            current['conta'], current['historico_code'], current['contrapartida'] = conta, hist, cp
                     continue
 
-                # 4.4) Texto comum -> descrição
+                # 4.4) Texto comum -> descrição (concatena)
                 if not current.get('descricao'):
                     current['descricao'] = _clean_spaces(line)
                     candidate_desc = current['descricao']
                     conta, hist, cp = _classificar_conta_historico(current['descricao'])
                     current['conta'], current['historico_code'], current['contrapartida'] = conta, hist, cp
                 else:
-                    # só concatena se não for claramente valor/documento
                     current['descricao'] = _clean_spaces(current['descricao'] + ' ' + line)
+
+    fitz_doc.close()
 
     if current:
         if not current.get('descricao') and candidate_desc:
             current['descricao'] = candidate_desc
-        rows.append(current)  # << inclui mesmo sem valor
+        rows.append(current)
 
-    # remove lançamentos sem valor
-    rows = [r for r in rows if (r.get('descricao') or r.get('documento'))]
-    return rows
+    rows = [r for r in rows if (r.get('descricao') or r.get('documento') or r.get('valor') is not None)]
+    meta = {
+        "usou_ocr": len(paginas_ocr) > 0,
+        "paginas_ocr": paginas_ocr,
+        "total_paginas": len(paginas_ocr) + (fitz.open(pdf_path).page_count - len(paginas_ocr)) if paginas_ocr else fitz.open(pdf_path).page_count
+    }
+    return rows, meta
 
 def export_to_xlsx(rows: List[Dict], out_xlsx_path: str) -> None:
     import pandas as pd
@@ -331,36 +437,50 @@ def export_to_xlsx(rows: List[Dict], out_xlsx_path: str) -> None:
         if c not in df.columns:
             df[c] = None
     df = df[col_ordem]
-    df['valor'] = df['valor'].astype(float)
+    df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
     with pd.ExcelWriter(out_xlsx_path, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Extrato')
 
-def export_to_txt_contabil(rows: List[Dict], out_txt_path: str, *, codigo_prefixo="1", codigo_meio="5", codigo_cc="337") -> None:
-    import hashlib
-    def _doc_or_hash(r):
-        d = (r.get('documento') or '').strip()
-        if d:
-            return d
-        key = (r.get('data_liq','') + '|' + r.get('descricao','')).encode('utf-8')
-        return hashlib.md5(key).hexdigest()[:10].upper()
+def export_to_txt_contabil(
+    rows: List[Dict],
+    out_txt_path: str,
+    *,
+    codigo_prefixo="1",   # continua 1
+    codigo_meio="5",      # fallback se não houver contrapartida no lançamento
+    codigo_cc="337"       # fallback se não houver histórico no lançamento
+) -> None:
+    from decimal import Decimal
+
     def _fmt_data_ddmmaa(dmy: str) -> str:
-        return dmy.replace('/','')
-    def _fmt_valor_2p(v: Decimal) -> str:
+        return dmy.replace('/', '')
+
+    def _fmt_valor_2p(v) -> str:
+        try:
+            v = Decimal(str(v))
+        except Exception:
+            pass
         return f"{abs(v):.2f}"
+
     with open(out_txt_path, 'w', encoding='utf-8') as f:
         for r in rows:
             if r.get('valor') is None:
                 continue
+
             data = _fmt_data_ddmmaa(r['data_liq'])
-            doc = _doc_or_hash(r)
+            conta = (r.get('conta') or "").strip()
+            contrapartida = (r.get('contrapartida') or codigo_meio)
             valor = _fmt_valor_2p(r['valor'])
+            historico = (r.get('historico_code') or codigo_cc)
             hist_txt = (r.get('descricao') or '').replace('"', "'")
-            linha = f'{codigo_prefixo},{data},{doc},{codigo_meio},{valor},{codigo_cc},"{hist_txt}"'
+            linha = f'{codigo_prefixo},{data},{conta},{contrapartida},{valor},{historico},"{hist_txt}"'
             f.write(linha + '\n')
 
 def processar_extrato_pdf(in_pdf_path: str, out_xlsx_path: str, out_txt_path: Optional[str]=None, config: Optional[Dict]=None) -> Dict:
     config = config or {}
-    rows = parse_xp_extrato_pdf(in_pdf_path)
+    ocr_dpi = int(config.get("ocr_dpi", 300))
+    ocr_lang = config.get("ocr_lang", "por")
+
+    rows, meta = parse_xp_extrato_pdf(in_pdf_path, ocr_dpi=ocr_dpi, ocr_lang=ocr_lang)
     export_to_xlsx(rows, out_xlsx_path)
     if out_txt_path:
         export_to_txt_contabil(
@@ -370,4 +490,122 @@ def processar_extrato_pdf(in_pdf_path: str, out_xlsx_path: str, out_txt_path: Op
             codigo_meio=config.get('codigo_meio', '5'),
             codigo_cc=config.get('codigo_cc', '337'),
         )
-    return {'quantidade_lancamentos': len(rows)}
+
+    resultado = {
+        'quantidade_lancamentos': len(rows),
+        'paginas_ocr': meta.get("paginas_ocr", []),
+        'usou_ocr': meta.get("usou_ocr", False),
+    }
+    if meta.get("usou_ocr"):
+        aviso = "⚠️ Atenção: OCR foi utilizado nas páginas {}. Confira os valores, pois o OCR pode confundir números (ex.: 0 ↔ O, , ↔ .).".format(
+            ", ".join(map(str, meta["paginas_ocr"]))
+        )
+        resultado['aviso'] = aviso
+        print(aviso)
+    return resultado
+
+def debug_dump_pdf(pdf_path: str, max_lines_per_page: int = 9999, *, ocr_lang: str = "por", ocr_dpi: int = 300) -> None:
+    print("==== DEBUG XP EXTRATO ====")
+    try:
+        import pdfplumber
+    except Exception as e:
+        print("pdfplumber não disponível:", e)
+        return
+
+    # roda o parser (com OCR condicional) para obter rows + meta (inclusive páginas com OCR)
+    try:
+        rows_preview, meta = parse_xp_extrato_pdf(pdf_path, ocr_dpi=ocr_dpi, ocr_lang=ocr_lang)
+    except Exception as e:
+        print("ERRO rodando parse_xp_extrato_pdf:", e)
+        rows_preview, meta = [], {"usou_ocr": False, "paginas_ocr": []}
+
+    if meta.get("usou_ocr"):
+        print(f"⚠️ AVISO GERAL: OCR foi utilizado neste arquivo nas páginas {', '.join(map(str, meta['paginas_ocr']))}.")
+        print("   Confira os valores, pois podem haver erros de reconhecimento (0↔O, vírgula/ponto, etc.).")
+
+    fitz_doc = fitz.open(pdf_path)
+    total_rows = rows_preview
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for pidx, page in enumerate(pdf.pages, start=1):
+            # Se esta página consta como OCR pelo parser, já renderizamos direto via OCR
+            if pidx in meta.get("paginas_ocr", []):
+                used_ocr = True
+                fpage = fitz_doc.load_page(pidx - 1)
+                raw_lines = _ocr_page_to_lines(fpage, dpi=ocr_dpi, lang=ocr_lang)
+            else:
+                # tenta texto; se falhar, gera OCR (não deve acontecer se meta já tinha)
+                raw_lines = _page_to_lines(page)
+                used_ocr = False
+                if not raw_lines:
+                    text = page.extract_text() or ""
+                    raw_lines = [l.rstrip() for l in text.splitlines()]
+                if not raw_lines:
+                    used_ocr = True
+                    fpage = fitz_doc.load_page(pidx - 1)
+                    raw_lines = _ocr_page_to_lines(fpage, dpi=ocr_dpi, lang=ocr_lang)
+
+            exploded = _explode_lines(raw_lines)
+
+            tag_ocr = " | OCR" if used_ocr else ""
+            print(f"\n--- PÁGINA {pidx} | cruas={len(raw_lines)} | explodidas={len(exploded)}{tag_ocr} ---")
+            if used_ocr:
+                print("⚠️ AVISO: Esta página foi processada com OCR. Confira os valores extraídos.")
+            first_date_only = None
+            for i, raw in enumerate(exploded[:max_lines_per_page], start=1):
+                line = raw.strip()
+                if not line:
+                    continue
+
+                tags = []
+                if HEADER_RE.search(line) or _is_header_line(line):
+                    tags.append("HEADER")
+                if FUTUROS_RE.search(line):
+                    tags.append("FUTUROS")
+                if DATE_LINE_RE.match(line):
+                    tags.append("DATE-LINE")
+                else:
+                    if ONE_DATE_ONLY_RE.match(line):
+                        tags.append("DATE1")
+                    elif NEXT_DATE_AND_TEXT_RE.match(line):
+                        tags.append("DATE2+TXT")
+
+                if DOC_NO_WITH_TEXT_RE.match(line) or DOC_NO_RE.match(line):
+                    tags.append("DOC-NO")
+                if _is_big_doc_code(line):
+                    tags.append("DOC-LONGO")
+                if DECIMAL_RE.search(line):
+                    tags.append("VALOR")
+
+                parts = _split_on_known_starts(line)
+                if len(parts) > 1:
+                    tags.append(f"SPLITx{len(parts)}")
+
+                tagtxt = " | ".join(tags) if tags else "..."
+                print(f"[P{pidx}:{i:03d}] {tagtxt}  {line}")
+
+    fitz_doc.close()
+
+    print("\n==== RESUMO PARSER ====")
+    print(f"Lançamentos extraídos: {len(total_rows)}")
+    for j, r in enumerate(total_rows[:20], start=1):
+        dv = r.get('valor')
+        try:
+            val = f"{Decimal(dv):.2f}"
+        except Exception:
+            val = str(dv)
+        print(f"{j:02d}. {r.get('data_liq')} {r.get('data_mov')} | {r.get('documento') or ''} | {val} | {r.get('descricao')[:80] if r.get('descricao') else ''}")
+
+if __name__ == "__main__":
+    import argparse, os
+    parser = argparse.ArgumentParser(description="Debug do parser de extrato XP (com OCR condicional + aviso)")
+    parser.add_argument("pdf", help="Caminho do extrato PDF")
+    parser.add_argument("--max", type=int, default=200, help="Máx. linhas por página no debug")
+    parser.add_argument("--ocr-lang", default="por", help="Idioma do Tesseract (ex.: 'por' ou 'por+eng')")
+    parser.add_argument("--ocr-dpi", type=int, default=300, help="DPI para renderização antes do OCR")
+    args = parser.parse_args()
+
+    path = os.path.expanduser(args.pdf)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Arquivo não encontrado: {path}")
+    debug_dump_pdf(path, max_lines_per_page=args.max, ocr_lang=args.ocr_lang, ocr_dpi=args.ocr_dpi)
