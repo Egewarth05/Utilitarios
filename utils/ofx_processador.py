@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+from typing import Optional
 
 def sgml_para_xml(raw: str) -> str:
     raw = raw[raw.find('<OFX>') : ]
@@ -11,44 +12,72 @@ def sgml_para_xml(raw: str) -> str:
     body = pattern.sub(fechar, raw)
     return '<?xml version="1.0" encoding="ISO-8859-1"?>\n' + body
 
+_STMTTRN_RX = re.compile(r'(<STMTTRN>.*?</STMTTRN>)', re.IGNORECASE | re.DOTALL)
+
+_HAS_MEMO_RX            = re.compile(r'<MEMO\b', re.IGNORECASE)
+_NAME_CLOSED_RX         = re.compile(r'<NAME>(.*?)</NAME>', re.IGNORECASE | re.DOTALL)
+_NAME_SINGLELINE_RX     = re.compile(r'^\s*<NAME>([^\r\n<]*)\s*$', re.IGNORECASE | re.MULTILINE)
+_NAME_OPEN_UNCLOSED_RX  = re.compile(r'<NAME>([^<\r\n]+)', re.IGNORECASE)
+
+def _remove_all_name(block: str) -> str:
+    # Remove NAME fechado
+    block = _NAME_CLOSED_RX.sub('', block)
+    # Remove NAME em linha sem fechamento
+    block = _NAME_SINGLELINE_RX.sub('', block)
+    # Remove NAME aberto sem fechamento na mesma linha
+    block = _NAME_OPEN_UNCLOSED_RX.sub('', block)
+    return block
+
+def _extract_first_name(block: str) -> Optional[str]:
+    m = _NAME_CLOSED_RX.search(block)
+    if m:
+        return m.group(1).strip()
+    m = _NAME_SINGLELINE_RX.search(block)
+    if m:
+        return m.group(1).strip()
+    m = _NAME_OPEN_UNCLOSED_RX.search(block)
+    if m:
+        return m.group(1).strip()
+    return None
+
+def _to_memo_only(block: str) -> str:
+    # Se já tem MEMO, só limpe quaisquer NAME restantes
+    if _HAS_MEMO_RX.search(block):
+        return _remove_all_name(block)
+
+    # Senão, tenta extrair um NAME e convertê-lo para MEMO
+    desc = _extract_first_name(block)
+    if desc:
+        # Remove todos os NAME
+        block = _remove_all_name(block)
+        # Insere MEMO antes de </STMTTRN>
+        block = re.sub(r'</STMTTRN>', f'\n<MEMO>{desc}</MEMO>\n</STMTTRN>',
+                       block, flags=re.IGNORECASE, count=1)
+    return block
 
 def processar_ofx_caixa(ofx_path, save_path):
     with open(ofx_path, 'r', encoding='ISO-8859-1') as f:
-        texto = f.read()
+        txt = f.read()
 
-    parts = texto.split('<OFX>', 1)
-    cabecalho = parts[0]
-    corpo = '<OFX>' + parts[1]
+    parts = txt.split('<OFX>', 1)
+    if len(parts) == 2:
+        cabecalho, corpo = parts[0], '<OFX>' + parts[1]
+    else:
+        cabecalho, corpo = '', txt
+
+    def repl(m):
+        try:
+            return _to_memo_only(m.group(1))
+        except Exception:
+            # Se algo der errado, devolve o bloco original para não quebrar
+            return m.group(1)
+
+    corpo = _STMTTRN_RX.sub(repl, corpo)
     corpo = re.sub(r'><', '>\n<', corpo)
-    linhas = corpo.splitlines()
 
-    temp = []
-    memo_valor = None
-    for linha in linhas:
-        s = linha.strip()
-        if s.startswith('<MEMO>') and s.endswith('</MEMO>'):
-            memo_valor = re.search(r'<MEMO>(.*?)</MEMO>', s).group(1)
-            temp.append(s)
-        elif memo_valor and s.startswith('<NAME>') and s.endswith('</NAME>'):
-            name_valor = re.search(r'<NAME>(.*?)</NAME>', s).group(1)
-            temp[-1] = f'<MEMO>{memo_valor} - {name_valor}</MEMO>'
-            memo_valor = None
-        else:
-            temp.append(s)
-
-    resultado = []
-    resultado.extend([linha + '\n' for linha in cabecalho.splitlines()])
-    indent = 0
-    for linha in temp:
-        if linha.startswith('</'):
-            indent -= 1
-        resultado.append(' ' * indent + linha + '\n')
-        if linha.startswith('<') and not linha.startswith('</') and not re.match(r'<[^>]+>.*</[^>]+>$', linha):
-            indent += 1
-
+    out = (cabecalho + '\n' if cabecalho else '') + corpo
     with open(save_path, 'w', encoding='ISO-8859-1') as f:
-        f.writelines(resultado)
-
+        f.write(out)
 
 def processar_ofx_sicoob(ofx_path, save_path):
     with open(ofx_path, 'r', encoding='ISO-8859-1') as f:
