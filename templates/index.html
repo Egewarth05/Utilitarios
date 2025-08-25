@@ -6,14 +6,8 @@
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"/>
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet"/>
   <style>
-    body {
-      background: #0d1117;
-      color: #e1e4e8;
-    }
-    .navbar {
-      background: rgba(0,0,0,0.7);
-    }
-    /* Hero full-screen */
+    body { background: #0d1117; color: #e1e4e8; }
+    .navbar { background: rgba(0,0,0,0.7); }
     .hero {
       height: 100vh;
       background: url('/static/img/hero-bg.jpg') center/cover no-repeat;
@@ -21,50 +15,30 @@
     }
     .hero::before {
       content: '';
-      position: absolute;
-      inset: 0;
+      position: absolute; inset: 0;
       background: rgba(0,0,0,0.6);
     }
-    .hero .content {
-      position: relative;
-      z-index: 1;
-    }
-    #tools .card,
-    #tools .card .card-body {
-    color: #ffffff !important;
-    }
-    /* Cards section */
-    #tools .card {
-      background: #161b22;
-      border: none;
-    }
-    #tools .card .btn-outline-light {
-      border-color: #58a6ff;
-      color: #58a6ff;
-    }
-    #tools .card .btn-outline-light:hover {
-      background: #58a6ff;
-      color: #0d1117;
-    }
-    footer {
-      background: #010409;
-      color: #6e7681;
-    }
+    .hero .content { position: relative; z-index: 1; }
+    #tools .card, #tools .card .card-body { color: #ffffff !important; }
+    #tools .card { background: #161b22; border: none; }
+    #tools .card .btn-outline-light { border-color: #58a6ff; color: #58a6ff; }
+    #tools .card .btn-outline-light:hover { background: #58a6ff; color: #0d1117; }
+    footer { background: #010409; color: #6e7681; }
   </style>
 </head>
 <body>
 
   <nav class="navbar navbar-expand-lg navbar-dark fixed-top">
-  <div class="container">
-    <a class="navbar-brand d-flex align-items-center" href="#">
-      <img src="{{ url_for('static', filename='img/inatec-logo.png') }}"
-           alt="INATEC"
-           style="height:50px; width:auto; max-width:200px; object-fit:contain;">
-      <span class="ms-3">Utilitários</span>
-    </a>
-    <button class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navMenu">
-      <span class="navbar-toggler-icon"></span>
-    </button>
+    <div class="container">
+      <a class="navbar-brand d-flex align-items-center" href="#">
+        <img src="{{ url_for('static', filename='img/inatec-logo.png') }}"
+             alt="INATEC"
+             style="height:50px; width:auto; max-width:200px; object-fit:contain;">
+        <span class="ms-3">Utilitários</span>
+      </a>
+      <button class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navMenu">
+        <span class="navbar-toggler-icon"></span>
+      </button>
       <div class="collapse navbar-collapse" id="navMenu">
         <ul class="navbar-nav ms-auto">
           <li class="nav-item"><a class="nav-link" href="#tools">Ferramentas</a></li>
@@ -73,13 +47,13 @@
     </div>
   </nav>
 
-    <header class="hero d-flex align-items-center justify-content-center text-center text-white">
+  <header class="hero d-flex align-items-center justify-content-center text-center text-white">
     <div class="content container">
-        <h1 class="display-4 fw-bold">Utilitários Internos</h1>
-        <p class="lead mb-4">Facilitadores de tarefas do escritório</p>
-        <a href="#tools" class="btn btn-primary btn-lg">Ver Ferramentas</a>
+      <h1 class="display-4 fw-bold">Utilitários Internos</h1>
+      <p class="lead mb-4">Facilitadores de tarefas do escritório</p>
+      <a href="#tools" class="btn btn-primary btn-lg">Ver Ferramentas</a>
     </div>
-    </header>
+  </header>
 
   <section id="tools" class="py-5">
     <div class="container">
@@ -88,10 +62,10 @@
         <div class="col-md-4">
           <div class="card h-100 text-center p-3">
             <div class="card-body">
-              <i class="fas fa-file-archive fa-3x mb-3 text-primary"></i>
-              <h5 class="card-title">Comparador de NFs</h5>
-              <p class="card-text">Verifique quais notas estão no RAR mas não no PDF.</p>
-              <a href="{{ url_for('nf_comparador') }}" class="btn btn-outline-light">Acessar</a>
+              <i class="fas fa-coins fa-3x mb-3 text-primary"></i>
+              <h5 class="card-title">Processador de Fornecedores</h5>
+              <p class="card-text">Processa arquivos Excel de pagamentos de Fornecedores - SCHROEDER.</p>
+              <a href="{{ url_for('pagamentos_processador') }}" class="btn btn-outline-light">Acessar</a>
             </div>
           </div>
         </div>
@@ -118,14 +92,15 @@
           </div>
         </div>
 
-        <div class="container">
-          <h1>Utilitários</h1>
-          <p>Selecione uma ferramenta:</p>
-          <ul>
-              <li><a href="/nf_comparador">Comparador de Notas Fiscais</a></li>
-              <li><a href="/combustivel">Processador de Combustível</a></li>
-              <li><a href="/ofx_processador">Processador de OFX</a></li>
-              <li><a href="/pagamentos">Processador de Pagamentos</a></li> </ul>
+        <div class="col-md-4">
+          <div class="card h-100 text-center p-3">
+            <div class="card-body">
+              <i class="fas fa-file-pdf fa-3x mb-3 text-warning"></i>
+              <h5 class="card-title">Extrato PDF - XP</h5>
+              <p class="card-text">Lê o PDF (XP) e gera XLSX e TXT configurado para importação - AVITEC.</p>
+              <a href="{{ url_for('extrato_pdf') }}" class="btn btn-outline-light">Acessar</a>
+            </div>
+          </div>
         </div>
 
         <div class="col-md-4">
@@ -133,8 +108,19 @@
             <div class="card-body">
               <i class="fas fa-file-invoice fa-3x mb-3 text-info"></i>
               <h5 class="card-title">Processador de Folha</h5>
-              <p class="card-text">Formata e gera relatórios de folha de pagamento - SCHROEDER. </p>
+              <p class="card-text">Formata e gera relatórios de folha de pagamento - SCHROEDER.</p>
               <a href="{{ url_for('folha_pagamento') }}" class="btn btn-outline-light">Acessar</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-md-4">
+          <div class="card h-100 text-center p-3">
+            <div class="card-body">
+              <i class="fas fa-list-check fa-3x mb-3 text-primary"></i>
+              <h5 class="card-title">TXT Caixa Financeiro</h5>
+              <p class="card-text">Lê o “Resumo das Contas” do TXT e gera um novo TXT pronto para importar - VIDA ATIVA.</p>
+              <a href="{{ url_for('resumo_contas') }}" class="btn btn-outline-light">Acessar</a>
             </div>
           </div>
         </div>
