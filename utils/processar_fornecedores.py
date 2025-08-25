@@ -7,15 +7,14 @@ import re
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 # Nome do arquivo Excel principal que contém todas as abas.
-NOME_ARQUIVO_EXCEL_PRINCIPAL = 'Relat cont_bil.xlsx'
+NOME_ARQUIVO_EXCEL_PRINCIPAL = None
 
 # Nomes exatos das abas (sheets) dentro do arquivo Excel que você quer processar.
 NOME_ABA_ESQUADRIAS = 'Pagamentos com NF Esquadrias'
 POSSIVEIS_FERRO_NOBRE = ['Pagamentos com NF Ferro Nobre', 'Paamentos com NF Ferro Nobre']
 
 HEADER_ROW_ESQUADRIAS = 3
-HEADER_ROW_FERRO_NOBRE = 1 
-
+HEADER_ROW_FERRO_NOBRE = 1
 
 COLUNAS_ORIGINAIS = {
     'Nome': 'Fornecedor',
@@ -25,7 +24,7 @@ COLUNAS_ORIGINAIS = {
     'Centro Custo': 'Centro de Custo',
 }
 
-ARQUIVO_SAIDA = 'pagamentos_processados_final.xlsx' 
+ARQUIVO_SAIDA = None
 
 CODIGOS_FORNECEDORES = {
     'ACEVILLE TRANSPORTES LTDA': 5072093,
@@ -46,6 +45,7 @@ CODIGOS_FORNECEDORES = {
     'DISK VIDROS': 5020397,
     'ENERVOLT SOLUCOES EM ENERGIA LTDA': 5015186,
     'EXPRESSO SAO MIGUEL S/A' : 5000475,
+    'CERTISIGN CERTIFICADORA DIGITAL S.A' : 5196739,
     'G.V. COMERCIO DE MATERIAIS DE FERRAGENS LTDA': 5015199,
     'G2 COMPONENTES' : 5050002,
     'GMAD CHAPECOMP SUPRIMENTOS PARA MOVEIS LTDA': 5020804,
@@ -53,16 +53,17 @@ CODIGOS_FORNECEDORES = {
     'GURGELMIX MAQUINAS E FERRAMENTAS S.A.' : 5026594,
     'HDU INDUSTRIA METALURGICA LTDA EPP' : 5196659,
     'INATEC CONTABILIDADE' : 5000107,
-    'ARTEFERRO BRASIL' : 5122443, 
+    'ARTEFERRO BRASIL' : 5122443,
     'JAIR MOREIRA' : 5015851,
     'JGI COMERCIO DE OXIGENIOS PATO BRANCO' : 5121354,
-    'JOSE ANTONIO SANTIN  FILHOS LTDA' : 5014909, 
+    'JOSE ANTONIO SANTIN  FILHOS LTDA' : 5014909,
     'KARLINSKI COMERCIO DE TINTAS LTDA - ME': 5017934,
     'LEILIANE PIETRO BIAZI ME' : 5042424,
     'LUTHIER GESTAO ESTRATEGICA EM PROPRIEDADE INTELECTUAL' : 5199807,
-    'MULLER DISTRIBUIDORA' : 5021276, 
-    'MAQFER TELHAS DE ALUZINCO' : 5043163, 
+    'MULLER DISTRIBUIDORA' : 5021276,
+    'MAQFER TELHAS DE ALUZINCO' : 5043163,
     'Megamaq Ferramentas e Acessorios para Industria Lt' : 5122798,
+    'MEGAMAQ FERRAMENTAS E ACESSORIOS PARA INDUSTRIA' : 5122798,
     'METALURGICA CORTESA LTDA' : 5043494,
     'METALURGICA DE TONI' : 5044274,
     'MINNER SC' : 5002494,
@@ -103,7 +104,6 @@ CODIGOS_FORNECEDORES = {
     'ENERTEC ENERGIA E TECNOLOGIA' : 5001704,
     'DLOCAL' : 1496,
     'BOLD CHAPECO' : 5021250,
-    'IBAMA/CGFIN - COORDENACAO GERAL DE FINANCAS' : 5001525,
     'MINNER COMERCIAL LTDA' : 5002494,
     'MICHELIN VIDROS' : 5023090,
     'ALVANE COMERCIO DE ALUMINIOS E COMPONENTES LTDA.' : 5196624,
@@ -162,8 +162,52 @@ CODIGOS_FORNECEDORES = {
     'EXPRESSO SAO MIGUEL S/A CURITIBA' : 5000475,
     'IEM CARDEALMAR' : 5196617,
     'KRG INDUSTRIA' : 5200081,
-    
+    'COOPER A1 TUNAS' : 5000007,
+    'CONSTRUTECH' : 5038628,
+    'FREIBERGER SERVIÇOS ELETROMECANICOS' : 5001125,
+    'INVIOLAVEL CEDRO SISTEMAS DE ALARMES LTDA ME' : 5001525,
+    'ESQUADRISOFT SISTEMAS LTDA' : 5200108,
+    'PORTAL INFORMATICA' : 5007621,
+    'RADIO ITAPIRANGA LTDA' : 25056,
+    'POSTO BELA VISTA' : 5030809,
+    'SUPERMERCADO VENEZA LTDA' : 5010201,
+    'BOLFE EMPREENDIMENTOS E PARTICIPACOES LTDA' : 25060,
 }
+
+# --- Overrides específicos para Schroeder Esquadrias ---
+ESQUADRIAS_OVERRIDES = {
+    'NAPORT PORTAS E PORTOES': 25063,
+    'ROBERT BOSCH' : 5021397,
+    'MULTI-ACO INDUSTRIA E COMERCIO LTDA': 25064,
+    'ARTEFERRO BRASIL': 25065,
+    'PRIMA FERRAGENS' : 5200158,
+    'Copema Distribuidora Automotiva': 25066,
+    'PERFILADOS VANZIN LTDA': 25067,
+    'JGI COMERCIO DE OXIGENIOS PATO BRANCO': 25068,
+    'TEVERE': 25069,
+    'SUPER CATARINA COMERCIO DE VIDROS': 5196693,
+    'INVIOLAVEL SAO MIGUEL' : 1496,
+    'W VETRO' : 1496,
+    'PORTAL INFORMATICA' : 1496,
+    'CELESC DISTRIBUICAO S.A' : 1496,
+    'PERFYACO MATRIZ': 25070,
+    'BONDMANN QUIMICA': 25071,
+    'NESSI PROMOCAO DE EVENTOS E COMERCIAL LTDA': 25072,
+}
+
+def _rebuild_normalized_map():
+    global CODIGOS_FORNECEDORES_NORMALIZADO
+    CODIGOS_FORNECEDORES_NORMALIZADO = {
+        normalize_name(k): v for k, v in CODIGOS_FORNECEDORES.items()
+    }
+
+def set_empresa(empresa: str | None):
+    if not empresa:
+        return
+    empresa = empresa.strip().lower()
+    if empresa in ('esquadrias', 'schroeder esquadrias'):
+        CODIGOS_FORNECEDORES.update(ESQUADRIAS_OVERRIDES)
+        _rebuild_normalized_map()  # <-- RECONSTRÓI o mapa normalizado após atualizar
 
 def normalize_name(s):
     return re.sub(r'\s+', ' ', str(s).strip().upper())
@@ -268,10 +312,6 @@ def processar_dados_sheet(df, original_cols_map, sheet_name):
     return df_final
 
 def gerar_planilhas_convertidas(processed_dfs, arquivo_saida):
-    """
-    Gera duas novas abas convertidas no formato solicitado:
-    1,data,codigo,5,valor,337,"fornecedor - documento - centro de custo"
-    """
     print("Gerando planilhas convertidas...")
 
     with pd.ExcelWriter(arquivo_saida, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
@@ -285,11 +325,30 @@ def gerar_planilhas_convertidas(processed_dfs, arquivo_saida):
 
             df = processed_dfs[nome_original].copy()
 
+            # Remove linhas sem código
+            if 'Código' in df.columns:
+                df = df[df['Código'].astype(str).str.strip().str.upper() != 'NÃO DEFINIDO']
+
             if 'Código' not in df.columns:
-                print(f"⚠️ Coluna 'Código' não encontrada na aba '{nome_original}'. Usando '0000000' como padrão.")
-                df['CodigoLimpo'] = "0000000"
+                print(f"⚠️ Coluna 'Código' não encontrada na aba '{nome_original}'. Usando vazio.")
+                df['CodigoLimpo'] = ""
             else:
-                df['CodigoLimpo'] = df['Código'].apply(lambda x: str(int(float(x))).zfill(7) if pd.notna(x) and str(x).strip().lower() != 'não definido' else "0000000")
+                def _coerce_codigo(x):
+                    if pd.isna(x):
+                        return ""
+                    if isinstance(x, (int, float)):
+                        return str(int(x))          # sem .0 e sem zeros a mais
+                    s = str(x).strip()
+                    if s.lower() == 'não definido':
+                        return ""
+                    m = re.search(r'\d+', s)       # pega só os dígitos (evita “.0”)
+                    return m.group(0) if m else ""
+
+                # ✅ Atribuição que faltava:
+                df['CodigoLimpo'] = df['Código'].apply(_coerce_codigo)
+
+            # (opcional) se quiser descartar linhas ainda sem código após o coerce:
+            # df = df[df['CodigoLimpo'] != ""]
 
             df['Linha Convertida'] = df.apply(
                 lambda row: ",".join([
@@ -303,7 +362,7 @@ def gerar_planilhas_convertidas(processed_dfs, arquivo_saida):
                 ]),
                 axis=1
             )
-            # Salva apenas a coluna final convertida
+
             df[['Linha Convertida']].to_excel(writer, sheet_name=nome_convertido, index=False, header=False)
             print(f"Aba '{nome_convertido}' criada com sucesso.")
 
@@ -337,6 +396,12 @@ def carregar_sheet_com_header_detectado(caminho, sheet_name, dtypes, esperados, 
     return pd.read_excel(caminho, sheet_name=sheet_name, header=0, dtype=dtypes)
 
 def processar_planilha_pagamentos_separado():
+    if not NOME_ARQUIVO_EXCEL_PRINCIPAL or not ARQUIVO_SAIDA:
+        raise ValueError("Arquivo de entrada/saída não definido. Use a função *_custom(...) passando os caminhos.")
+
+    print("DEBUG lendo:", NOME_ARQUIVO_EXCEL_PRINCIPAL)
+    print("DEBUG escrevendo:", ARQUIVO_SAIDA)
+
     processed_dfs = {}
 
     POSSIVEIS_ESQUADRIAS  = ['Pagamentos com NF Esquadrias', 'Paagamentos com NF Esquadrias']
@@ -348,20 +413,20 @@ def processar_planilha_pagamentos_separado():
     def pick_existing_sheet(possiveis):
         for candidate in possiveis:
             for existing in available_sheets:
-                if existing.lower() == candidate.lower():
+                if existing.strip().lower() == candidate.strip().lower():
                     return existing
         return None
 
     esperados = list(COLUNAS_ORIGINAIS.keys())
     dtypes = {'Vlr.Recebido': str, 'Documento': str}
 
-    # 1) Tenta Esquadrias
+    # 1) Esquadrias (se houver)
     sheet_esquad = pick_existing_sheet(POSSIVEIS_ESQUADRIAS)
     if sheet_esquad:
         print(f"Iniciando processamento da aba Esquadrias: '{sheet_esquad}'")
         df_raw = carregar_sheet_com_header_detectado(
             NOME_ARQUIVO_EXCEL_PRINCIPAL,
-            sheet_esquad,             # <— aqui era sheet_ferro
+            sheet_esquad,
             dtypes,
             esperados,
             max_scan=10
@@ -370,24 +435,24 @@ def processar_planilha_pagamentos_separado():
             df_raw, COLUNAS_ORIGINAIS, 'Esquadrias Processada'
         )
 
-    # 2) Se não achou Esquadrias, tenta Ferro Nobre
-    else:
-        sheet_ferro = pick_existing_sheet(POSSIVEIS_FERRO_NOBRE)
-        if sheet_ferro:
-            print(f"Iniciando processamento da aba Ferro Nobre: '{sheet_ferro}'")
-            df_raw = carregar_sheet_com_header_detectado(
-                NOME_ARQUIVO_EXCEL_PRINCIPAL,
-                sheet_ferro,
-                dtypes,
-                esperados,
-                max_scan=10
-            )
-            processed_dfs['Ferro Nobre Processada'] = processar_dados_sheet(
-                df_raw, COLUNAS_ORIGINAIS, 'Ferro Nobre Processada'
-            )
-        else:
-            print("Nenhuma aba de Esquadrias nem de Ferro Nobre encontrada. Abortando.")
-            return
+    # 2) Ferro Nobre (independente de ter Esquadrias)
+    sheet_ferro = pick_existing_sheet(POSSIVEIS_FERRO_NOBRE)
+    if sheet_ferro:
+        print(f"Iniciando processamento da aba Ferro Nobre: '{sheet_ferro}'")
+        df_raw = carregar_sheet_com_header_detectado(
+            NOME_ARQUIVO_EXCEL_PRINCIPAL,
+            sheet_ferro,
+            dtypes,
+            esperados,
+            max_scan=10
+        )
+        processed_dfs['Ferro Nobre Processada'] = processar_dados_sheet(
+            df_raw, COLUNAS_ORIGINAIS, 'Ferro Nobre Processada'
+        )
+
+    if not processed_dfs:
+        print("Nenhuma aba de Esquadrias nem de Ferro Nobre encontrada. Abortando.")
+        return
 
     # 3) Grava saída e planilhas convertidas
     with pd.ExcelWriter(ARQUIVO_SAIDA, engine='openpyxl') as writer:
@@ -396,17 +461,19 @@ def processar_planilha_pagamentos_separado():
 
     gerar_planilhas_convertidas(processed_dfs, ARQUIVO_SAIDA)
 
-def processar_planilha_pagamentos_separado_custom(arquivo_entrada, arquivo_saida):
+def processar_planilha_pagamentos_separado_custom(arquivo_entrada, arquivo_saida, empresa=None):
     global NOME_ARQUIVO_EXCEL_PRINCIPAL, ARQUIVO_SAIDA
     NOME_ARQUIVO_EXCEL_PRINCIPAL = arquivo_entrada
     ARQUIVO_SAIDA = arquivo_saida
+    set_empresa(empresa)  # <-- aplica regras por empresa
     processar_planilha_pagamentos_separado()
 
 def main():
     if len(sys.argv) >= 3:
         entrada = sys.argv[1]
         saida = sys.argv[2]
-        processar_planilha_pagamentos_separado_custom(entrada, saida)
+        empresa = sys.argv[3] if len(sys.argv) >= 4 else None  # <-- NOVO
+        processar_planilha_pagamentos_separado_custom(entrada, saida, empresa)
     else:
         processar_planilha_pagamentos_separado()
 
