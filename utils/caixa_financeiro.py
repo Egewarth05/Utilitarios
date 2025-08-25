@@ -27,11 +27,11 @@ END_RX = re.compile(
 def _parse_amount(s: str) -> Optional[Decimal]:
     if not s:
         return None
-    s = re.sub(r"[^\d\.]", "", s)
-    # Ex.: 39.325.27 -> último ponto é decimal
+    # Mantém só dígitos e ponto; remove milhares e deixa o último ponto como decimal
+    s = re.sub(r"[^\d.]", "", s)
     if s.count(".") > 1:
-        i = s.rfind(".")
-        s = s[:i].replace(".", "") + s[i:]
+        head, tail = s.rsplit(".", 1)   # última ocorrência é o decimal
+        s = head.replace(".", "") + "." + tail
     try:
         return Decimal(s).quantize(Decimal("0.01"))
     except InvalidOperation:
@@ -95,9 +95,15 @@ def parse_resumo_contas(txt_path: str) -> List[Dict]:
         raise ValueError("Nenhuma linha válida encontrada no 'Resumo das Contas'.")
     return rows
 
-# -----------------------------
-# Normalização e Mapeamentos
-# -----------------------------
+def _usa_primeiro_dia(grupo_desc: str, conta_desc: str) -> bool:
+    texto = _norm(f"{grupo_desc} {conta_desc}")
+    return ("VALOR ABERTURA DE CAIXA" in texto) or ("VALOR ABERTURA CAIXA" in texto)
+
+def _primeiro_dia_mes(data_ddmmaaaa: str) -> str:
+    mm = data_ddmmaaaa[2:4]
+    aaaa = data_ddmmaaaa[4:8]
+    return f"01{mm}{aaaa}"
+
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s or "")
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -110,6 +116,8 @@ MAPEAMENTO_FIXO: dict[str, tuple[str, str]] = {
     _norm("CREDIÁRIO"): ("142", "21"),
     _norm("CREDIARIO"): ("142", "21"),
     _norm("ENTRADAS DE CAIXA"): ("142", "21"),
+    _norm("DINHEIRO/PIX SICOOB"): ("142", "21"),
+    _norm("VALOR ABERTURA DE CAIXA"): ("25091", "66"),
     _norm("BAIXA TELE ENTREGA"): ("142", "21"),
     _norm("SOBRA CAIXA DIÁRIO"): ("142", "21"),
     _norm("CARTAO DE CREDITO"): ("142", "21"),
@@ -121,35 +129,28 @@ MAPEAMENTO_FIXO: dict[str, tuple[str, str]] = {
     _norm("ALUGUEL SALA COMERCIAL 2"): ("4430", "449"),
     _norm("ALUGUEL SALA COMERCIAL"): ("4430", "449"),
     _norm("CARTÓRIOS"): ("4555", "449"),
+    _norm("SANGRIA"): ("25091", "66"),
     _norm("COMPRAS CONCORRÊNCIA"): ("3035", "337"),
     _norm("DEVOLUCAO CONVENIOS"): ("142", "21"),
     _norm("TRANSF. CX FINANCEIRO P/"): ("25091", "66"),
     _norm("RETORNO CLIENTE (FAT105)"): ("142", "21"),
     _norm("DEVOLUÇÃO VALOR P/ CLIENT"): ("142", "21"),
     _norm("FALTA CAIXA DIÁRIO"): ("142", "21"),
-    _norm("SERV.TERCEIRIZADOS/ASSESS"): ("4537", "449"),
+    _norm("SERV.TERCEIRIZADOS/ASSESS"): ("1496", "337"),
     _norm("ALUGUEL ESTACIONAMENTO"): ("4430", "449"),
     _norm("DESP. PESSOAL - HORA EXTRA"): ("4014", "449"),
     _norm("DESP. PESSOAL - VALE TRAN"): ("4014", "449"),
-    _norm("PROLABORE SUELE FRANZEN"): ("4014", "449"),
-    _norm("PROLABORE HELMUT FUHR"): ("4014", "449"),
+    _norm("PROLABORE SUELE FRANZEN"): ("680", "10003"),
+    _norm("PROLABORE HELMUT FUHR"): ("680", "10003"),
     _norm("MATERIAIS EXPEDIENTE/PAPE"): ("4534", "449"),
     _norm("LIMPEZA/FAXINA (MUTIRÃO/P"): ("4546", "449"),
 }
 
 def _deve_excluir(grupo_desc: str, conta_desc: str) -> bool:
-    """
-    Excluir sempre linhas que contenham:
-      - SICOOB
-      - SANGRIA
-      - VALOR ABERTURA DE CAIXA (ou sem o 'DE')
-    """
+
     texto = _norm(f"{grupo_desc} {conta_desc}")
     termos_banidos = (
-        "SICOOB",
-        "SANGRIA",
-        "VALOR ABERTURA DE CAIXA",
-        "VALOR ABERTURA CAIXA",
+    #Inserir os termos que quiser ignorar. Ex: "SANGRIA",
     )
     return any(t in texto for t in termos_banidos)
 
@@ -164,9 +165,6 @@ def _map_conta_historico(grupo_desc: str, conta_desc: str) -> tuple[str, str]:
     # default de DESPESA/CUSTO
     return "4698", "32"
 
-# -----------------------------
-# Data: último dia do mês dominante no TXT
-# -----------------------------
 DATE_RX = re.compile(r"\b(\d{2})[\/\-.](\d{2})[\/\-.](\d{2,4})\b")
 
 def _canon_year(y: int) -> int:
@@ -198,11 +196,6 @@ def _inferir_data_ddmmaaaa_pelo_conteudo(full_text: str) -> str:
     last_day = calendar.monthrange(yy, mm)[1]
     return f"{last_day:02d}{mm:02d}{yy:04d}"
 
-# -----------------------------
-# Exportação
-# prefixo,data,contrapartida,conta,valor,historico,"descricao"
-# (se for SAÍDA/custo, inverter contrapartida<->conta)
-# -----------------------------
 def _dec_to_str(x: Optional[Decimal], decimal_comma: bool) -> str:
     if x is None:
         x = Decimal("0.00")
@@ -215,6 +208,8 @@ def export_import_txt(rows: List[Dict], out_path: str, data_ddmmaaaa: str,
     use_comma = (decimal == "comma")
     linhas_out: List[str] = []
 
+    primeiro_dia = _primeiro_dia_mes(data_ddmmaaaa)
+
     for r in rows:
         if _deve_excluir(r["grupo_desc"], r["conta_desc"]):
             continue
@@ -222,18 +217,20 @@ def export_import_txt(rows: List[Dict], out_path: str, data_ddmmaaaa: str,
         conta, hist = _map_conta_historico(r["grupo_desc"], r["conta_desc"])
         desc = r["conta_desc"]
 
-        # ENTRADA → mantém a ordem (prefixo, data, contrapartida, conta, ...)
+        data_linha = primeiro_dia if _usa_primeiro_dia(r["grupo_desc"], r["conta_desc"]) else data_ddmmaaaa
+
+        # ENTRADA
         if r.get("entrada") and r["entrada"] > 0:
             valor = _dec_to_str(r["entrada"], use_comma)
             linhas_out.append(
-                f'{prefixo},{data_ddmmaaaa},{contrapartida},{conta},{valor},{hist},"{desc}"'
+                f'{prefixo},{data_linha},{contrapartida},{conta},{valor},{hist},"{desc}"'
             )
 
-        # SAÍDA (custo) → inverte conta e contrapartida
+        # SAÍDA (custo)
         if r.get("saida") and r["saida"] > 0:
             valor = _dec_to_str(r["saida"], use_comma)
             linhas_out.append(
-                f'{prefixo},{data_ddmmaaaa},{conta},{contrapartida},{valor},{hist},"{desc}"'
+                f'{prefixo},{data_linha},{conta},{contrapartida},{valor},{hist},"{desc}"'
             )
 
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
@@ -241,9 +238,6 @@ def export_import_txt(rows: List[Dict], out_path: str, data_ddmmaaaa: str,
 
     return len(linhas_out)
 
-# -----------------------------
-# Orquestrador exposto ao Flask
-# -----------------------------
 def processar_resumo_contas(in_txt_path: str, out_txt_path: str, *, decimal: str = "dot") -> Dict:
     """
     Lê o TXT, identifica a data (último dia do mês), extrai o Resumo das Contas,
@@ -257,7 +251,7 @@ def processar_resumo_contas(in_txt_path: str, out_txt_path: str, *, decimal: str
     linhas_out = export_import_txt(rows, out_txt_path, data_ddmmaaaa, decimal=decimal)
 
     return {
-        "linhas": linhas_out,          # nº de linhas efetivamente geradas (após filtros)
+        "linhas": linhas_out,
         "saida": out_txt_path,
         "decimal": decimal,
         "data": data_ddmmaaaa
